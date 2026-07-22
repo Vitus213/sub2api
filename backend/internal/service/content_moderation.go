@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
@@ -1727,10 +1728,15 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 	if client == nil {
 		client = http.DefaultClient
 	}
+	traceAttempt := recording.BeginAttempt(req.Context(), recording.AttemptMetadata{
+		Provider: "openai", Operation: "moderations", UpstreamModel: cfg.Model, Endpoint: endpoint,
+	}, raw)
 	resp, err := client.Do(req)
 	if err != nil {
+		traceAttempt.End(recording.AttemptResult{Err: err})
 		return nil, err
 	}
+	resp.Body = traceAttempt.ObserveResponse(resp.StatusCode, resp.Body)
 	defer func() { _ = resp.Body.Close() }()
 	if httpStatus != nil {
 		*httpStatus = resp.StatusCode

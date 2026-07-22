@@ -53,6 +53,38 @@ func (r *settingRepository) Set(ctx context.Context, key, value string) error {
 		Exec(ctx)
 }
 
+// CompareAndSet atomically replaces a setting only when its raw value still
+// matches the value read by the caller. It also handles first creation.
+func (r *settingRepository) CompareAndSet(ctx context.Context, key, oldValue, newValue string) (bool, error) {
+	now := time.Now()
+	updated, err := r.client.Setting.Update().
+		Where(setting.KeyEQ(key), setting.ValueEQ(oldValue)).
+		SetValue(newValue).
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return false, err
+	}
+	if updated == 1 {
+		return true, nil
+	}
+	if oldValue != "" {
+		return false, nil
+	}
+	err = r.client.Setting.Create().
+		SetKey(key).
+		SetValue(newValue).
+		SetUpdatedAt(now).
+		Exec(ctx)
+	if err == nil {
+		return true, nil
+	}
+	if ent.IsConstraintError(err) {
+		return false, nil
+	}
+	return false, err
+}
+
 func (r *settingRepository) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil

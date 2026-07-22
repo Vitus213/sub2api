@@ -513,8 +513,21 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					return fmt.Errorf("resolve Grok websocket cache identity: %w", err)
 				}
 			}
+			writeBridgeMessage := func(message []byte) error {
+				writeErr := writeClientMessage(message)
+				if hooks != nil && hooks.AfterClientWrite != nil {
+					hooks.AfterClientWrite(turn, message, writeErr)
+				}
+				return writeErr
+			}
+			turnCtx := ctx
+			if hooks != nil && hooks.ContextForTurn != nil {
+				if tracedCtx := hooks.ContextForTurn(turn); tracedCtx != nil {
+					turnCtx = tracedCtx
+				}
+			}
 			result, bridgeErr := s.proxyOpenAIWSHTTPBridgeTurn(
-				ctx,
+				turnCtx,
 				c,
 				account,
 				token,
@@ -526,7 +539,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				currentBridgePayload.imageInputSize,
 				grokCacheIdentity,
 				turn,
-				writeClientMessage,
+				writeBridgeMessage,
 			)
 			if hooks != nil && hooks.AfterTurn != nil {
 				hooks.AfterTurn(turn, result, bridgeErr)
@@ -929,7 +942,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					}
 				}
 				replayCollector.AddEvent(eventType, upstreamMessage)
-				if err := writeClientMessage(upstreamMessage); err != nil {
+				writeErr := writeClientMessage(upstreamMessage)
+				if hooks != nil && hooks.AfterClientWrite != nil {
+					hooks.AfterClientWrite(turn, upstreamMessage, writeErr)
+				}
+				if writeErr != nil {
+					err := writeErr
 					if isOpenAIWSClientDisconnectError(err) {
 						clientDisconnected = true
 						closeStatus, closeReason := summarizeOpenAIWSReadCloseError(err)

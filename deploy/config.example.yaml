@@ -971,6 +971,22 @@ jwt:
   access_token_expire_minutes: 0
 
 # =============================================================================
+# Model Request Tracing (Langfuse OTLP, Optional)
+# 模型请求追踪（Langfuse OTLP，可选）
+# =============================================================================
+model_tracing:
+  # Disabled by default. See docs/MODEL_TRACING.md before production rollout.
+  # 默认关闭；生产灰度前请阅读 docs/MODEL_TRACING.md。
+  enabled: false
+  endpoint: ""
+  public_key: ""
+  secret_key: ""
+  prompt_max_bytes: 1048576
+  response_max_bytes: 1048576
+  media_max_bytes: 1048576
+  capture_media_content: false
+
+# =============================================================================
 # TOTP (2FA) Configuration
 # TOTP 双因素认证配置
 # =============================================================================

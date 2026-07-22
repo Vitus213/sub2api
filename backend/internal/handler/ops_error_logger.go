@@ -672,6 +672,26 @@ func (w *opsCaptureWriter) shouldCapture() bool {
 	return !rejected
 }
 
+type responseWriterUnwrapper interface {
+	UnwrapResponseWriter() gin.ResponseWriter
+}
+
+func containsOpsCaptureWriter(current gin.ResponseWriter, target *opsCaptureWriter) bool {
+	// A small bound prevents a faulty third-party wrapper from creating an
+	// infinite unwrap cycle on the request hot path.
+	for depth := 0; current != nil && depth < 16; depth++ {
+		if writer, ok := current.(*opsCaptureWriter); ok {
+			return writer == target
+		}
+		unwrapper, ok := current.(responseWriterUnwrapper)
+		if !ok {
+			return false
+		}
+		current = unwrapper.UnwrapResponseWriter()
+	}
+	return false
+}
+
 // OpsErrorLoggerMiddleware records error responses (status >= 400) into ops_error_logs.
 //
 // Notes:
@@ -683,9 +703,10 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		w := acquireOpsCaptureWriter(originalWriter)
 		w.ctx = c
 		defer func() {
-			// Restore the original writer before returning so outer middlewares
-			// don't observe a pooled wrapper that has been released.
-			if c.Writer == w {
+			// A tracing/capture middleware may wrap the pooled writer after this
+			// middleware starts. Drop that completed inner chain before release so
+			// outer finalizers never retain a writer whose delegate was reset.
+			if containsOpsCaptureWriter(c.Writer, w) {
 				c.Writer = originalWriter
 			}
 			releaseOpsCaptureWriter(w)

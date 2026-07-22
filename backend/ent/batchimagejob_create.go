@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/batchimagejob"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 )
 
 // BatchImageJobCreate is the builder for creating a BatchImageJob entity.
@@ -356,6 +357,20 @@ func (_c *BatchImageJobCreate) SetVersion(v int) *BatchImageJobCreate {
 func (_c *BatchImageJobCreate) SetNillableVersion(v *int) *BatchImageJobCreate {
 	if v != nil {
 		_c.SetVersion(*v)
+	}
+	return _c
+}
+
+// SetTraceContinuation sets the "trace_continuation" field.
+func (_c *BatchImageJobCreate) SetTraceContinuation(v recording.TraceContinuation) *BatchImageJobCreate {
+	_c.mutation.SetTraceContinuation(v)
+	return _c
+}
+
+// SetNillableTraceContinuation sets the "trace_continuation" field if the given value is not nil.
+func (_c *BatchImageJobCreate) SetNillableTraceContinuation(v *recording.TraceContinuation) *BatchImageJobCreate {
+	if v != nil {
+		_c.SetTraceContinuation(*v)
 	}
 	return _c
 }
@@ -887,6 +902,10 @@ func (_c *BatchImageJobCreate) createSpec() (*BatchImageJob, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.Version(); ok {
 		_spec.SetField(batchimagejob.FieldVersion, field.TypeInt, value)
 		_node.Version = value
+	}
+	if value, ok := _c.mutation.TraceContinuation(); ok {
+		_spec.SetField(batchimagejob.FieldTraceContinuation, field.TypeJSON, value)
+		_node.TraceContinuation = value
 	}
 	if value, ok := _c.mutation.OutputExpiresAt(); ok {
 		_spec.SetField(batchimagejob.FieldOutputExpiresAt, field.TypeTime, value)
@@ -1451,6 +1470,24 @@ func (u *BatchImageJobUpsert) UpdateVersion() *BatchImageJobUpsert {
 // AddVersion adds v to the "version" field.
 func (u *BatchImageJobUpsert) AddVersion(v int) *BatchImageJobUpsert {
 	u.Add(batchimagejob.FieldVersion, v)
+	return u
+}
+
+// SetTraceContinuation sets the "trace_continuation" field.
+func (u *BatchImageJobUpsert) SetTraceContinuation(v recording.TraceContinuation) *BatchImageJobUpsert {
+	u.Set(batchimagejob.FieldTraceContinuation, v)
+	return u
+}
+
+// UpdateTraceContinuation sets the "trace_continuation" field to the value that was provided on create.
+func (u *BatchImageJobUpsert) UpdateTraceContinuation() *BatchImageJobUpsert {
+	u.SetExcluded(batchimagejob.FieldTraceContinuation)
+	return u
+}
+
+// ClearTraceContinuation clears the value of the "trace_continuation" field.
+func (u *BatchImageJobUpsert) ClearTraceContinuation() *BatchImageJobUpsert {
+	u.SetNull(batchimagejob.FieldTraceContinuation)
 	return u
 }
 
@@ -2248,6 +2285,27 @@ func (u *BatchImageJobUpsertOne) AddVersion(v int) *BatchImageJobUpsertOne {
 func (u *BatchImageJobUpsertOne) UpdateVersion() *BatchImageJobUpsertOne {
 	return u.Update(func(s *BatchImageJobUpsert) {
 		s.UpdateVersion()
+	})
+}
+
+// SetTraceContinuation sets the "trace_continuation" field.
+func (u *BatchImageJobUpsertOne) SetTraceContinuation(v recording.TraceContinuation) *BatchImageJobUpsertOne {
+	return u.Update(func(s *BatchImageJobUpsert) {
+		s.SetTraceContinuation(v)
+	})
+}
+
+// UpdateTraceContinuation sets the "trace_continuation" field to the value that was provided on create.
+func (u *BatchImageJobUpsertOne) UpdateTraceContinuation() *BatchImageJobUpsertOne {
+	return u.Update(func(s *BatchImageJobUpsert) {
+		s.UpdateTraceContinuation()
+	})
+}
+
+// ClearTraceContinuation clears the value of the "trace_continuation" field.
+func (u *BatchImageJobUpsertOne) ClearTraceContinuation() *BatchImageJobUpsertOne {
+	return u.Update(func(s *BatchImageJobUpsert) {
+		s.ClearTraceContinuation()
 	})
 }
 
@@ -3246,6 +3304,27 @@ func (u *BatchImageJobUpsertBulk) AddVersion(v int) *BatchImageJobUpsertBulk {
 func (u *BatchImageJobUpsertBulk) UpdateVersion() *BatchImageJobUpsertBulk {
 	return u.Update(func(s *BatchImageJobUpsert) {
 		s.UpdateVersion()
+	})
+}
+
+// SetTraceContinuation sets the "trace_continuation" field.
+func (u *BatchImageJobUpsertBulk) SetTraceContinuation(v recording.TraceContinuation) *BatchImageJobUpsertBulk {
+	return u.Update(func(s *BatchImageJobUpsert) {
+		s.SetTraceContinuation(v)
+	})
+}
+
+// UpdateTraceContinuation sets the "trace_continuation" field to the value that was provided on create.
+func (u *BatchImageJobUpsertBulk) UpdateTraceContinuation() *BatchImageJobUpsertBulk {
+	return u.Update(func(s *BatchImageJobUpsert) {
+		s.UpdateTraceContinuation()
+	})
+}
+
+// ClearTraceContinuation clears the value of the "trace_continuation" field.
+func (u *BatchImageJobUpsertBulk) ClearTraceContinuation() *BatchImageJobUpsertBulk {
+	return u.Update(func(s *BatchImageJobUpsert) {
+		s.ClearTraceContinuation()
 	})
 }
 

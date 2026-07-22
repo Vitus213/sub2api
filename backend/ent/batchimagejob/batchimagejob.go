@@ -67,6 +67,8 @@ const (
 	FieldRetryCount = "retry_count"
 	// FieldVersion holds the string denoting the version field in the database.
 	FieldVersion = "version"
+	// FieldTraceContinuation holds the string denoting the trace_continuation field in the database.
+	FieldTraceContinuation = "trace_continuation"
 	// FieldOutputExpiresAt holds the string denoting the output_expires_at field in the database.
 	FieldOutputExpiresAt = "output_expires_at"
 	// FieldInputDeletedAt holds the string denoting the input_deleted_at field in the database.
@@ -127,6 +129,7 @@ var Columns = []string{
 	FieldManifestHash,
 	FieldRetryCount,
 	FieldVersion,
+	FieldTraceContinuation,
 	FieldOutputExpiresAt,
 	FieldInputDeletedAt,
 	FieldOutputDeletedAt,

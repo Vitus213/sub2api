@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -100,10 +102,9 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	taskCtx, recorder, cancel := newAsyncImageContext(c, body, h.tasks.ExecutionTimeout())
-	task, err := h.tasks.Create(c.Request.Context(), service.ImageTaskOwner{UserID: apiKey.UserID, APIKeyID: apiKey.ID})
+	continuation, _ := recording.ContinuationFromContext(c.Request.Context())
+	task, err := h.tasks.CreateWithContinuation(c.Request.Context(), service.ImageTaskOwner{UserID: apiKey.UserID, APIKeyID: apiKey.ID}, continuation)
 	if err != nil {
-		cancel()
 		imageTaskError(c, err)
 		return
 	}
@@ -122,7 +123,12 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 		"poll_url":   pollURL,
 	})
 
-	go h.run(task.ID, platform, taskCtx, recorder, cancel)
+	identity := middleware2.ResolvedIdentity{UserID: apiKey.UserID, APIKeyID: apiKey.ID}
+	if apiKey.GroupID != nil {
+		identity.GroupID = *apiKey.GroupID
+	}
+	taskCtx, recorder := newAsyncImageContext(c, body, context.Background())
+	go h.run(task.ID, platform, asyncImageRequestModel(h, c, platform, body), c.GetHeader("Content-Type"), body, continuation, identity, taskCtx, recorder)
 }
 
 func (h *AsyncImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, apiKey *service.APIKey, platform string, body []byte) bool {
@@ -220,10 +226,43 @@ func (h *AsyncImageHandler) executeWithGateway(platform string, c *gin.Context) 
 	h.openAI.Images(c)
 }
 
-func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, recorder *httptest.ResponseRecorder, cancel context.CancelFunc) {
+func (h *AsyncImageHandler) run(
+	taskID, platform, model, contentType string,
+	input []byte,
+	continuation recording.TraceContinuation,
+	identity middleware2.ResolvedIdentity,
+	taskCtx *gin.Context,
+	recorder *httptest.ResponseRecorder,
+) {
+	base := context.Background()
+	var execution *modeltrace.AsyncExecution
+	if h != nil && h.openAI != nil {
+		if manager := h.openAI.modelTraceManager.Load(); manager != nil {
+			execution = manager.StartAsyncExecution(base, continuation, modeltrace.AsyncExecutionMetadata{
+				Identity:    identity,
+				TaskID:      taskID,
+				Model:       model,
+				Operation:   "image.generation",
+				ContentType: contentType,
+			}, input)
+			if execution != nil {
+				base = execution.Context()
+			}
+		}
+	}
+	executionCtx, cancel := context.WithTimeout(base, h.tasks.ExecutionTimeout())
 	defer cancel()
+	taskCtx.Request = taskCtx.Request.Clone(executionCtx)
+
+	traceStatus := "failed"
+	var traceOutput []byte
+	var traceErr error
+	if execution != nil {
+		defer func() { execution.End(traceStatus, traceOutput, traceErr) }()
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			traceErr = fmt.Errorf("image generation task panicked: %v", recovered)
 			logger.L().Error("image_task.execution_panicked", zap.String("task_id", taskID), zap.Any("panic", recovered))
 			h.failTask(taskID, http.StatusInternalServerError, imageTaskErrorPayload("api_error", "image generation task panicked"))
 		}
@@ -231,7 +270,9 @@ func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, r
 
 	h.execute(platform, taskCtx)
 	body := bytes.TrimSpace(recorder.Body.Bytes())
+	traceOutput = append([]byte(nil), body...)
 	if err := taskCtx.Request.Context().Err(); err != nil && len(body) == 0 {
+		traceErr = err
 		h.failTask(taskID, http.StatusGatewayTimeout, imageTaskErrorPayload("timeout_error", "image generation task timed out"))
 		return
 	}
@@ -241,14 +282,19 @@ func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, r
 	}
 	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		if len(body) == 0 || !json.Valid(body) {
+			traceErr = errors.New("upstream returned an invalid image response")
 			h.failTask(taskID, http.StatusBadGateway, imageTaskErrorPayload("api_error", "upstream returned an invalid image response"))
 			return
 		}
 		if err := h.tasks.Complete(context.Background(), taskID, statusCode, json.RawMessage(body)); err != nil {
+			traceErr = err
 			logger.L().Error("image_task.complete_store_failed", zap.String("task_id", taskID), zap.Error(err))
+			return
 		}
+		traceStatus = "completed"
 		return
 	}
+	traceErr = fmt.Errorf("image generation failed with HTTP status %d", statusCode)
 	h.failTask(taskID, statusCode, extractImageTaskError(body))
 }
 
@@ -258,10 +304,11 @@ func (h *AsyncImageHandler) failTask(taskID string, statusCode int, taskErr json
 	}
 }
 
-func newAsyncImageContext(c *gin.Context, body []byte, timeoutDuration time.Duration) (*gin.Context, *httptest.ResponseRecorder, context.CancelFunc) {
-	base := context.WithoutCancel(c.Request.Context())
-	executionCtx, cancel := context.WithTimeout(base, timeoutDuration)
-	request := c.Request.Clone(executionCtx)
+func newAsyncImageContext(c *gin.Context, body []byte, base context.Context) (*gin.Context, *httptest.ResponseRecorder) {
+	if base == nil {
+		base = context.Background()
+	}
+	request := c.Request.Clone(base)
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(body)), nil
@@ -274,7 +321,21 @@ func newAsyncImageContext(c *gin.Context, body []byte, timeoutDuration time.Dura
 	recorderCtx, _ := gin.CreateTestContext(recorder)
 	taskCtx.Writer = recorderCtx.Writer
 	taskCtx.Request = request
-	return taskCtx, recorder, cancel
+	return taskCtx, recorder
+}
+
+func asyncImageRequestModel(h *AsyncImageHandler, c *gin.Context, platform string, body []byte) string {
+	if platform == service.PlatformGrok {
+		return strings.TrimSpace(service.ParseGrokMediaRequest(c.GetHeader("Content-Type"), body).Model)
+	}
+	if h == nil || h.openAI == nil || h.openAI.gatewayService == nil {
+		return ""
+	}
+	parsed, err := h.openAI.gatewayService.ParseOpenAIImagesRequest(c, body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Model)
 }
 
 func asyncImageRequestStreams(contentType string, body []byte) bool {

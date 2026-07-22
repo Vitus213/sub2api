@@ -1,0 +1,3 @@
+schema: local-spec-driven
+created: 2026-07-21
+goal: 在不影响模型请求的前提下提供完整链路、用量和 Prompt/Response 观测

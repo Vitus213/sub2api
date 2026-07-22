@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
@@ -55,8 +56,21 @@ func (u *anthropicHTTPUpstreamRecorder) Do(req *http.Request, proxyURL string, a
 		_ = req.Body.Close()
 		req.Body = io.NopCloser(bytes.NewReader(b))
 	}
+	attempt := recording.BeginAttempt(context.Background(), recording.AttemptMetadata{}, nil)
+	if req != nil {
+		if source, ok := recording.AttemptSourceFromContext(req.Context()); ok {
+			metadata := source.Metadata
+			metadata.Endpoint = req.URL.String()
+			metadata.AccountID = accountID
+			attempt = recording.BeginAttempt(req.Context(), metadata, source.Input)
+		}
+	}
 	if u.err != nil {
+		attempt.End(recording.AttemptResult{Err: u.err})
 		return nil, u.err
+	}
+	if u.resp != nil {
+		u.resp.Body = attempt.ObserveResponse(u.resp.StatusCode, u.resp.Body)
 	}
 	return u.resp, nil
 }
@@ -249,8 +263,15 @@ func TestGatewayService_AnthropicAPIKeyPassthrough_ForwardCountTokensPreservesBo
 		Schedulable: true,
 	}
 
-	err := svc.ForwardCountTokens(context.Background(), c, account, parsed)
+	baseCtx := context.Background()
+	activationCount := 0
+	ctx := recording.WithDeferredActivator(baseCtx, func() context.Context {
+		activationCount++
+		return baseCtx
+	})
+	err := svc.ForwardCountTokens(ctx, c, account, parsed)
 	require.NoError(t, err)
+	require.Equal(t, 1, activationCount, "actual upstream send must activate deferred model tracing")
 
 	require.Equal(t, "claude-3-opus-20240229", gjson.GetBytes(upstream.lastBody, "model").String(), "count_tokens 透传模式应应用账号级模型映射")
 	require.Equal(t, "upstream-anthropic-key", getHeaderRaw(upstream.lastReq.Header, "x-api-key"))
@@ -259,6 +280,46 @@ func TestGatewayService_AnthropicAPIKeyPassthrough_ForwardCountTokensPreservesBo
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, upstreamRespBody, rec.Body.String())
 	require.Empty(t, rec.Header().Get("Set-Cookie"))
+}
+
+func TestGatewayService_ForwardCountTokensActivatesDeferredTraceAtNativeSend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
+
+	body := []byte(`{"model":"claude-3-5-sonnet-latest","messages":[{"role":"user","content":"hello"}]}`)
+	parsed := &ParsedRequest{Body: NewRequestBodyRef(body), Model: "claude-3-5-sonnet-latest"}
+	upstream := &anthropicHTTPUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"input_tokens":42}`)),
+	}}
+	cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
+	svc := &GatewayService{
+		cfg:                  cfg,
+		responseHeaderFilter: compileResponseHeaderFilter(cfg),
+		httpUpstream:         upstream,
+		rateLimitService:     &RateLimitService{},
+	}
+	account := &Account{
+		ID: 103, Name: "anthropic-native-count", Platform: PlatformAnthropic,
+		Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "upstream-key", "base_url": "https://api.anthropic.com"},
+		Status:      StatusActive, Schedulable: true,
+	}
+
+	baseCtx := context.Background()
+	activationCount := 0
+	ctx := recording.WithDeferredActivator(baseCtx, func() context.Context {
+		activationCount++
+		return baseCtx
+	})
+	err := svc.ForwardCountTokens(ctx, c, account, parsed)
+	require.NoError(t, err)
+	require.Equal(t, 1, activationCount, "native actual upstream send must activate deferred model tracing")
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestGatewayService_AnthropicAPIKeyPassthrough_BearerAuthScheme(t *testing.T) {

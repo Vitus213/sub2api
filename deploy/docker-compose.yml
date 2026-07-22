@@ -109,6 +109,18 @@ services:
       - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
 
       # =======================================================================
+      # Model Request Tracing (Langfuse OTLP, Optional)
+      # =======================================================================
+      - MODEL_TRACING_ENABLED=${MODEL_TRACING_ENABLED:-false}
+      - MODEL_TRACING_ENDPOINT=${MODEL_TRACING_ENDPOINT:-}
+      - MODEL_TRACING_PUBLIC_KEY=${MODEL_TRACING_PUBLIC_KEY:-}
+      - MODEL_TRACING_SECRET_KEY=${MODEL_TRACING_SECRET_KEY:-}
+      - MODEL_TRACING_PROMPT_MAX_BYTES=${MODEL_TRACING_PROMPT_MAX_BYTES:-1048576}
+      - MODEL_TRACING_RESPONSE_MAX_BYTES=${MODEL_TRACING_RESPONSE_MAX_BYTES:-1048576}
+      - MODEL_TRACING_MEDIA_MAX_BYTES=${MODEL_TRACING_MEDIA_MAX_BYTES:-1048576}
+      - MODEL_TRACING_CAPTURE_MEDIA_CONTENT=${MODEL_TRACING_CAPTURE_MEDIA_CONTENT:-false}
+
+      # =======================================================================
       # Timezone Configuration
       # This affects ALL time operations in the application:
       # - Database timestamps

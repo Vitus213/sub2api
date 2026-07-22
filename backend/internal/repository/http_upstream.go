@@ -26,6 +26,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
@@ -200,6 +201,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 
 	// 执行请求
 	client := httpClientForUpstreamRequest(entry.client, req)
+	client = httpClientWithModelTrace(client, accountID)
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := servertiming.Do(client, req)
 	if err != nil {
@@ -264,6 +266,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	}
 
 	client := httpClientForUpstreamRequest(entry.client, req)
+	client = httpClientWithModelTrace(client, accountID)
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := servertiming.Do(client, req)
 	if err != nil {
@@ -281,6 +284,164 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	})
 
 	return resp, nil
+}
+
+// httpClientWithModelTrace instruments the actual RoundTrip boundary. This is
+// deliberately inside retry/fallback transports so every physical send gets a
+// distinct Attempt instead of collapsing multiple sends into one observation.
+func httpClientWithModelTrace(client *http.Client, accountID int64) *http.Client {
+	if client == nil {
+		return nil
+	}
+	clone := *client
+	base := clone.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	clone.Transport = &modelTraceRoundTripper{base: base, accountID: accountID}
+	return &clone
+}
+
+type modelTraceRoundTripper struct {
+	base      http.RoundTripper
+	accountID int64
+}
+
+func (t *modelTraceRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	attempt := beginHTTPModelTraceAttempt(req, t.accountID)
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		attempt.End(recording.AttemptResult{Err: err})
+		return nil, err
+	}
+	if resp != nil {
+		decompressResponseBody(resp)
+		resp.Body = attempt.ObserveResponse(resp.StatusCode, resp.Body)
+	}
+	return resp, nil
+}
+
+func beginHTTPModelTraceAttempt(req *http.Request, accountID int64) recording.Attempt {
+	if req == nil {
+		return recording.BeginAttempt(context.Background(), recording.AttemptMetadata{}, nil)
+	}
+	if source, ok := recording.AttemptSourceFromContext(req.Context()); ok {
+		metadata := source.Metadata
+		metadata.Endpoint = req.URL.String()
+		metadata.AccountID = accountID
+		metadata.ContentType = req.Header.Get("Content-Type")
+		return recording.BeginAttempt(req.Context(), metadata, source.Input)
+	}
+	limit, enabled := recording.InputLimit(req.Context())
+	if !enabled {
+		return recording.BeginAttempt(context.Background(), recording.AttemptMetadata{}, nil)
+	}
+	input := snapshotHTTPModelTraceInput(req, limit)
+	model := ""
+	if len(input) > 0 {
+		var envelope struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(input, &envelope)
+		model = strings.TrimSpace(envelope.Model)
+	}
+	operation, provider, pathModel := httpModelTraceURLMetadata(req.URL)
+	if profile := service.HTTPUpstreamProfileFromContext(req.Context()); profile != service.HTTPUpstreamProfileDefault {
+		provider = string(profile)
+	}
+	if model == "" {
+		model = pathModel
+	}
+	return recording.BeginAttempt(req.Context(), recording.AttemptMetadata{
+		Provider: provider, Operation: operation, UpstreamModel: model,
+		Endpoint: req.URL.String(), AccountID: accountID, ContentType: req.Header.Get("Content-Type"),
+	}, input)
+}
+
+func snapshotHTTPModelTraceInput(req *http.Request, limit int) []byte {
+	if req == nil || req.GetBody == nil || limit <= 0 {
+		return nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = body.Close() }()
+	input, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	if err != nil {
+		return nil
+	}
+	return input
+}
+
+func httpModelTraceURLMetadata(target *url.URL) (operation, provider, model string) {
+	if target == nil {
+		return "", "", ""
+	}
+	host := strings.ToLower(target.Hostname())
+	switch {
+	case strings.Contains(host, "anthropic"):
+		provider = "anthropic"
+	case strings.Contains(host, "google"), strings.Contains(host, "googleapis"):
+		provider = "gemini"
+	case strings.Contains(host, "x.ai"), strings.Contains(host, "grok"):
+		provider = "grok"
+	case strings.Contains(host, "openai"):
+		provider = "openai"
+	case strings.Contains(host, "bedrock"), strings.Contains(host, "amazonaws"):
+		provider = "bedrock"
+	}
+
+	segments := strings.Split(strings.Trim(target.Path, "/"), "/")
+	if len(segments) > 0 && segments[0] != "" {
+		operation = segments[len(segments)-1]
+		if _, action, found := strings.Cut(operation, ":"); found {
+			operation = action
+		}
+	}
+	for index := 0; index+1 < len(segments); index++ {
+		switch segments[index] {
+		case "models":
+			modelAction := segments[index+1]
+			if candidate, action, found := strings.Cut(modelAction, ":"); found {
+				model = candidate
+				operation = action
+			} else {
+				model = modelAction
+			}
+		case "model":
+			if provider == "bedrock" {
+				model, _ = url.PathUnescape(segments[index+1])
+			}
+		}
+	}
+	pathCategory := ""
+	for _, segment := range segments {
+		switch segment {
+		case "images", "videos":
+			pathCategory = segment
+		}
+	}
+	if provider == "" {
+		switch pathCategory {
+		case "videos":
+			provider = "grok"
+		case "images":
+			provider = "openai"
+		default:
+			switch operation {
+			case "responses", "completions", "embeddings", "images", "moderations":
+				provider = "openai"
+			case "messages", "count_tokens":
+				provider = "anthropic"
+			case "generateContent", "streamGenerateContent", "batchGenerateContent", "countTokens":
+				provider = "gemini"
+			case "extensions":
+				provider = "grok"
+			}
+		}
+	}
+	return operation, provider, strings.TrimSpace(model)
 }
 
 func httpClientForUpstreamRequest(client *http.Client, req *http.Request) *http.Client {

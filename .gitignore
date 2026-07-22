@@ -14,6 +14,11 @@ backend/bin/
 backend/server
 backend/sub2api
 backend/main
+# e2e 测试本地产物
+.e2e-bin/
+.e2e-tmp/
+config.e2e.yaml
+/config.yaml
 
 # Go 测试二进制
 *.test
@@ -121,6 +126,8 @@ tests
 CLAUDE.md
 .claude
 scripts
+!skills/sub2api-model-trace-e2e/scripts/
+!skills/sub2api-model-trace-e2e/scripts/**
 !backend/scripts/
 !backend/scripts/resolve-version.sh
 .code-review-state

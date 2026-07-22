@@ -200,6 +200,7 @@ Sub2API is an AI API gateway platform designed to distribute and manage API quot
 - **Built-in Payment System** - Supports EasyPay, Alipay, WeChat Pay, and Stripe for user self-service top-up, no separate payment service needed ([Configuration Guide](docs/PAYMENT.md))
 - **Admin Dashboard** - Web interface for monitoring and management
 - **External System Integration** - Embed external systems (e.g. ticketing) via iframe to extend the admin dashboard
+- **Optional Langfuse Model Tracing** - Export authenticated model execution traces through OTLP/HTTP with bounded capture, secret redaction, runtime hot switching, and fail-open delivery ([Operations Guide](docs/MODEL_TRACING.md))
 
 ## Ecosystem
 
@@ -728,7 +729,12 @@ Simple Mode is designed for individual developers or internal teams who want qui
 
 Long-running OpenAI/Grok image generation and editing can be submitted through `/v1/images/generations/async` or `/v1/images/edits/async`, then polled at `/v1/images/tasks/{task_id}` without holding a CDN connection open. See [Asynchronous Image Tasks](docs/ASYNC_IMAGE_TASKS.md) for request and response examples.
 
+## Model Request Tracing
+
+Sub2API can export authenticated model execution traces to self-hosted Langfuse over OTLP/HTTP. Tracing is disabled by default. Before enabling it, follow the [Model Tracing Operations Guide](docs/MODEL_TRACING.md) for secure configuration, canary rollout, operational signals, thresholds, and one-switch rollback.
+
 ---
+
 
 ## Grok / xAI Support
 

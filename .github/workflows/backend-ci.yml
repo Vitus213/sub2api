@@ -6,6 +6,9 @@ on:
 
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   shell:
@@ -21,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Validate model tracing Compose environment
+        run: /bin/bash deploy/tests/model-tracing-compose-test.sh
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod

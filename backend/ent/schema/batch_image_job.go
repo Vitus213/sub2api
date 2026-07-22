@@ -9,6 +9,8 @@ import (
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
+
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 )
 
 // BatchImageJob holds the schema definition for asynchronous image batch jobs.
@@ -55,6 +57,7 @@ func (BatchImageJob) Fields() []ent.Field {
 		field.String("manifest_hash").Optional().Nillable().MaxLen(128),
 		field.Int("retry_count").Default(0),
 		field.Int("version").Default(0),
+		field.JSON("trace_continuation", recording.TraceContinuation{}).Optional(),
 		field.Time("output_expires_at").Optional().Nillable().SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
 		field.Time("input_deleted_at").Optional().Nillable().SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
 		field.Time("output_deleted_at").Optional().Nillable().SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),

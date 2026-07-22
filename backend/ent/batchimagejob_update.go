@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/batchimagejob"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 )
 
 // BatchImageJobUpdate is the builder for updating BatchImageJob entities.
@@ -554,6 +555,26 @@ func (_u *BatchImageJobUpdate) AddVersion(v int) *BatchImageJobUpdate {
 	return _u
 }
 
+// SetTraceContinuation sets the "trace_continuation" field.
+func (_u *BatchImageJobUpdate) SetTraceContinuation(v recording.TraceContinuation) *BatchImageJobUpdate {
+	_u.mutation.SetTraceContinuation(v)
+	return _u
+}
+
+// SetNillableTraceContinuation sets the "trace_continuation" field if the given value is not nil.
+func (_u *BatchImageJobUpdate) SetNillableTraceContinuation(v *recording.TraceContinuation) *BatchImageJobUpdate {
+	if v != nil {
+		_u.SetTraceContinuation(*v)
+	}
+	return _u
+}
+
+// ClearTraceContinuation clears the value of the "trace_continuation" field.
+func (_u *BatchImageJobUpdate) ClearTraceContinuation() *BatchImageJobUpdate {
+	_u.mutation.ClearTraceContinuation()
+	return _u
+}
+
 // SetOutputExpiresAt sets the "output_expires_at" field.
 func (_u *BatchImageJobUpdate) SetOutputExpiresAt(v time.Time) *BatchImageJobUpdate {
 	_u.mutation.SetOutputExpiresAt(v)
@@ -1065,6 +1086,12 @@ func (_u *BatchImageJobUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if value, ok := _u.mutation.AddedVersion(); ok {
 		_spec.AddField(batchimagejob.FieldVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.TraceContinuation(); ok {
+		_spec.SetField(batchimagejob.FieldTraceContinuation, field.TypeJSON, value)
+	}
+	if _u.mutation.TraceContinuationCleared() {
+		_spec.ClearField(batchimagejob.FieldTraceContinuation, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.OutputExpiresAt(); ok {
 		_spec.SetField(batchimagejob.FieldOutputExpiresAt, field.TypeTime, value)
@@ -1681,6 +1708,26 @@ func (_u *BatchImageJobUpdateOne) AddVersion(v int) *BatchImageJobUpdateOne {
 	return _u
 }
 
+// SetTraceContinuation sets the "trace_continuation" field.
+func (_u *BatchImageJobUpdateOne) SetTraceContinuation(v recording.TraceContinuation) *BatchImageJobUpdateOne {
+	_u.mutation.SetTraceContinuation(v)
+	return _u
+}
+
+// SetNillableTraceContinuation sets the "trace_continuation" field if the given value is not nil.
+func (_u *BatchImageJobUpdateOne) SetNillableTraceContinuation(v *recording.TraceContinuation) *BatchImageJobUpdateOne {
+	if v != nil {
+		_u.SetTraceContinuation(*v)
+	}
+	return _u
+}
+
+// ClearTraceContinuation clears the value of the "trace_continuation" field.
+func (_u *BatchImageJobUpdateOne) ClearTraceContinuation() *BatchImageJobUpdateOne {
+	_u.mutation.ClearTraceContinuation()
+	return _u
+}
+
 // SetOutputExpiresAt sets the "output_expires_at" field.
 func (_u *BatchImageJobUpdateOne) SetOutputExpiresAt(v time.Time) *BatchImageJobUpdateOne {
 	_u.mutation.SetOutputExpiresAt(v)
@@ -2222,6 +2269,12 @@ func (_u *BatchImageJobUpdateOne) sqlSave(ctx context.Context) (_node *BatchImag
 	}
 	if value, ok := _u.mutation.AddedVersion(); ok {
 		_spec.AddField(batchimagejob.FieldVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.TraceContinuation(); ok {
+		_spec.SetField(batchimagejob.FieldTraceContinuation, field.TypeJSON, value)
+	}
+	if _u.mutation.TraceContinuationCleared() {
+		_spec.ClearField(batchimagejob.FieldTraceContinuation, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.OutputExpiresAt(); ok {
 		_spec.SetField(batchimagejob.FieldOutputExpiresAt, field.TypeTime, value)

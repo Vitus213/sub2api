@@ -1839,6 +1839,16 @@ func VersionLTE(v int) predicate.BatchImageJob {
 	return predicate.BatchImageJob(sql.FieldLTE(FieldVersion, v))
 }
 
+// TraceContinuationIsNil applies the IsNil predicate on the "trace_continuation" field.
+func TraceContinuationIsNil() predicate.BatchImageJob {
+	return predicate.BatchImageJob(sql.FieldIsNull(FieldTraceContinuation))
+}
+
+// TraceContinuationNotNil applies the NotNil predicate on the "trace_continuation" field.
+func TraceContinuationNotNil() predicate.BatchImageJob {
+	return predicate.BatchImageJob(sql.FieldNotNull(FieldTraceContinuation))
+}
+
 // OutputExpiresAtEQ applies the EQ predicate on the "output_expires_at" field.
 func OutputExpiresAtEQ(v time.Time) predicate.BatchImageJob {
 	return predicate.BatchImageJob(sql.FieldEQ(FieldOutputExpiresAt, v))

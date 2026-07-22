@@ -828,6 +828,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 
 	completedTurns := atomic.Int32{}
+	currentTurn := atomic.Int32{}
+	currentTurn.Store(1)
+	finishedTraceTurn := atomic.Int32{}
+	terminalWriteTurn := 0
 	turnLifecycle := newOpenAIWSPassthroughTurnLifecycle(true)
 	clientFrameConn := &openAIWSClientFrameConn{
 		conn:                 clientConn,
@@ -849,7 +853,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			isResponseCreate := eventType == "response.create"
 			acceptedTurn := false
 			if isResponseCreate {
-				if !turnLifecycle.beginResponseCreate(clientFrameConn.markTurnStarted) {
+				if !turnLifecycle.beginResponseCreate(func() {
+					currentTurn.Add(1)
+					clientFrameConn.markTurnStarted()
+				}) {
 					err := errors.New("overlapping response.create is not supported")
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, err.Error(), err)
 				}
@@ -869,10 +876,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				}
 			}
 			if isResponseCreate && hooks != nil && hooks.BeforeRequest != nil {
-				turnNo := int(completedTurns.Load()) + 1
-				if turnNo < 2 {
-					turnNo = 2
-				}
+				turnNo := int(currentTurn.Load())
 				requestModel := usageMeta.requestModelForFrame(payload)
 				if requestModel == "" {
 					requestModel = capturedSessionModel
@@ -988,7 +992,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				)
 			},
 			OnTurnComplete: func(turn openaiwsv2.RelayTurnResult) {
-				turnNo := int(completedTurns.Add(1))
+				completedTurns.Add(1)
+				turnNo := terminalWriteTurn
+				if turnNo <= 0 {
+					turnNo = int(currentTurn.Load())
+				}
 				turnResult := &OpenAIForwardResult{
 					RequestID: turn.RequestID,
 					Usage: OpenAIUsage{
@@ -1023,14 +1031,24 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				if hooks != nil && hooks.AfterTurn != nil {
 					hooks.AfterTurn(turnNo, turnResult, nil)
 				}
+				finishedTraceTurn.Store(int32(turnNo))
 			},
 			BeforeClientWrite: func(msgType coderws.MessageType, payload []byte) {
 				if msgType == coderws.MessageText && openAIWSPassthroughIsTerminalOutput(payload) {
 					turnLifecycle.beginTerminalWrite()
+					terminalWriteTurn = int(currentTurn.Load())
 				}
 			},
 			AfterClientWrite: func(msgType coderws.MessageType, payload []byte, writeErr error) {
-				if msgType == coderws.MessageText && openAIWSPassthroughIsTerminalOutput(payload) {
+				turnNo := int(currentTurn.Load())
+				isTerminal := msgType == coderws.MessageText && openAIWSPassthroughIsTerminalOutput(payload)
+				if isTerminal && terminalWriteTurn > 0 {
+					turnNo = terminalWriteTurn
+				}
+				if hooks != nil && hooks.AfterClientWrite != nil {
+					hooks.AfterClientWrite(turnNo, payload, writeErr)
+				}
+				if isTerminal {
 					turnLifecycle.finishTerminalWrite(writeErr == nil, clientFrameConn.markTurnCompleted)
 				}
 			},
@@ -1137,9 +1155,15 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			relayResult.DroppedDownstreamFrames,
 			turnCount,
 		)
-		// 正常路径按 terminal 事件逐 turn 已回调；仅在零 turn 场景兜底回调一次。
-		if turnCount == 0 && hooks != nil && hooks.AfterTurn != nil {
-			hooks.AfterTurn(1, result, nil)
+		// 正常路径按 terminal 事件逐 turn 已回调；仅在尚未结束的零业务完成 turn 上兜底。
+		if turnCount == 0 {
+			turnNo := int(currentTurn.Load())
+			if finishedTraceTurn.Load() < int32(turnNo) {
+				if hooks != nil && hooks.AfterTurn != nil {
+					hooks.AfterTurn(turnNo, result, nil)
+				}
+				finishedTraceTurn.Store(int32(turnNo))
+			}
 		}
 		return nil
 	}
@@ -1204,8 +1228,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		relayErr,
 		relayExit.WroteDownstream,
 	)
-	if hooks != nil && hooks.AfterTurn != nil {
-		hooks.AfterTurn(turnCount+1, nil, turnErr)
+	turnNo := int(currentTurn.Load())
+	if finishedTraceTurn.Load() < int32(turnNo) {
+		if hooks != nil && hooks.AfterTurn != nil {
+			hooks.AfterTurn(turnNo, nil, turnErr)
+		}
+		finishedTraceTurn.Store(int32(turnNo))
 	}
 	return turnErr
 }

@@ -799,6 +799,87 @@ func TestRelay_TraceEvents_IdleTimeout(t *testing.T) {
 	require.Contains(t, capturedStages, "relay_exit")
 }
 
+func TestRelay_SuccessfulTerminalWriteCompletesAfterClientObservation(t *testing.T) {
+	t.Parallel()
+	testRelayTerminalCompletionAfterClientObservation(
+		t,
+		newPassthroughTestFrameConn(nil, false),
+		nil,
+		"",
+	)
+}
+
+func TestRelay_FailedTerminalWriteCompletesAfterClientObservation(t *testing.T) {
+	t.Parallel()
+	writeFailure := errors.New("client disconnected")
+	testRelayTerminalCompletionAfterClientObservation(
+		t,
+		&passthroughWriteErrorFrameConn{err: writeFailure},
+		writeFailure,
+		"write_client",
+	)
+}
+
+func testRelayTerminalCompletionAfterClientObservation(
+	t *testing.T,
+	clientConn FrameConn,
+	wantWriteErr error,
+	wantRelayStage string,
+) {
+	t.Helper()
+	terminalPayload := []byte(`{"type":"response.completed","response":{"id":"resp_terminal_order","usage":{"input_tokens":2,"output_tokens":1}}}`)
+	upstreamConn := newPassthroughTestFrameConn([]passthroughTestFrame{{
+		msgType: coderws.MessageText,
+		payload: terminalPayload,
+	}}, true)
+	callbacks := make([]string, 0, 2)
+
+	_, relayExit := Relay(
+		context.Background(),
+		clientConn,
+		upstreamConn,
+		[]byte(`{"type":"response.create","model":"gpt-5.1"}`),
+		RelayOptions{
+			AfterClientWrite: func(_ coderws.MessageType, payload []byte, writeErr error) {
+				require.Equal(t, terminalPayload, payload)
+				if wantWriteErr == nil {
+					require.NoError(t, writeErr)
+				} else {
+					require.ErrorIs(t, writeErr, wantWriteErr)
+				}
+				callbacks = append(callbacks, "client_write")
+			},
+			OnTurnComplete: func(turn RelayTurnResult) {
+				require.Equal(t, "resp_terminal_order", turn.RequestID)
+				callbacks = append(callbacks, "turn_complete")
+			},
+		},
+	)
+
+	require.Equal(t, []string{"client_write", "turn_complete"}, callbacks)
+	if wantRelayStage == "" {
+		require.Nil(t, relayExit)
+		return
+	}
+	require.NotNil(t, relayExit)
+	require.Equal(t, wantRelayStage, relayExit.Stage)
+}
+
+type passthroughWriteErrorFrameConn struct {
+	err error
+}
+
+func (c *passthroughWriteErrorFrameConn) ReadFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
+	<-ctx.Done()
+	return coderws.MessageText, nil, ctx.Err()
+}
+
+func (c *passthroughWriteErrorFrameConn) WriteFrame(context.Context, coderws.MessageType, []byte) error {
+	return c.err
+}
+
+func (c *passthroughWriteErrorFrameConn) Close() error { return nil }
+
 // errorOnWriteFrameConn 是一个写入总是失败的 FrameConn 实现，用于测试首包写入失败。
 type errorOnWriteFrameConn struct{}
 

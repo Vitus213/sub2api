@@ -274,7 +274,10 @@ func TestBatchImageProviderProcessor_StatusFlow(t *testing.T) {
 			status: &BatchProviderStatus{InternalState: BatchProviderStateSucceeded, RawState: "SUCCEEDED", ProviderOutputRef: "files/output"},
 			result: `{"key":"ok","response":{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"` + batchImageTestData + `"}}]}}]}}` + "\n",
 		}
-		got, err := newTestBatchImageProcessor(repo, provider).Process(ctx, "imgbatch_flow")
+		processor := newTestBatchImageProcessor(repo, provider)
+		traceRecorder := &fakeBatchImageTraceRecorder{}
+		processor.TraceRecorder = traceRecorder
+		got, err := processor.Process(ctx, "imgbatch_flow")
 		require.NoError(t, err)
 		require.False(t, got.Terminal)
 		require.Equal(t, time.Millisecond, got.RequeueAfter)
@@ -282,13 +285,101 @@ func TestBatchImageProviderProcessor_StatusFlow(t *testing.T) {
 		require.Equal(t, "files/output", batchImageDerefString(repo.jobs["imgbatch_flow"].ProviderOutputRef))
 		require.Equal(t, []string{BatchImageJobStatusIndexing, BatchImageJobStatusSettling}, repo.transitions["imgbatch_flow"])
 		require.Equal(t, BatchImageCounts{SuccessCount: 1}, repo.counts["imgbatch_flow"])
+		require.Equal(t, "imgbatch_flow", traceRecorder.batchID)
+		require.Len(t, traceRecorder.items, 1)
+		require.Equal(t, "ok", traceRecorder.items[0].CustomID)
+		require.Equal(t, "SUCCEEDED", traceRecorder.result.ProviderState)
+	})
+
+	t.Run("trace recorder panic does not change batch outcome", func(t *testing.T) {
+		repo := newFakeBatchImageRepository()
+		repo.jobs["imgbatch_flow"] = newJob(BatchImageJobStatusSubmitted)
+		provider := &fakeProcessorProvider{
+			status: &BatchProviderStatus{InternalState: BatchProviderStateSucceeded, RawState: "SUCCEEDED", ProviderOutputRef: "files/output"},
+			result: `{"key":"ok","response":{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"` + batchImageTestData + `"}}]}}]}}` + "\n",
+		}
+		processor := newTestBatchImageProcessor(repo, provider)
+		processor.TraceRecorder = &fakeBatchImageTraceRecorder{panicOnRecord: true}
+
+		got, err := processor.Process(ctx, "imgbatch_flow")
+		require.NoError(t, err)
+		require.False(t, got.Terminal)
+		require.Equal(t, time.Millisecond, got.RequeueAfter)
+		require.Equal(t, BatchImageJobStatusSettling, repo.jobs["imgbatch_flow"].Status)
 	})
 
 	t.Run("failed provider marks job failed", func(t *testing.T) {
 		repo := newFakeBatchImageRepository()
 		repo.jobs["imgbatch_flow"] = newJob(BatchImageJobStatusRunning)
 		provider := &fakeProcessorProvider{status: &BatchProviderStatus{InternalState: BatchProviderStateFailed, RawState: "FAILED", ErrorCode: "BAD_PROMPT", ErrorMessage: "bad prompt"}}
-		got, err := newTestBatchImageProcessor(repo, provider).Process(ctx, "imgbatch_flow")
+		traceRecorder := &fakeBatchImageTraceRecorder{}
+		processor := newTestBatchImageProcessor(repo, provider)
+		processor.TraceRecorder = traceRecorder
+		got, err := processor.Process(ctx, "imgbatch_flow")
+		require.NoError(t, err)
+		require.True(t, got.Terminal)
+		require.Equal(t, BatchImageJobStatusFailed, repo.jobs["imgbatch_flow"].Status)
+		require.Equal(t, "BAD_PROMPT", batchImageDerefString(repo.jobs["imgbatch_flow"].LastErrorCode))
+		require.Equal(t, "imgbatch_flow", traceRecorder.batchID)
+		require.Empty(t, traceRecorder.items)
+		require.Equal(t, BatchImageJobStatusFailed, traceRecorder.result.Status)
+		require.Equal(t, "FAILED", traceRecorder.result.ProviderState)
+		require.Equal(t, "provider", traceRecorder.result.ErrorStage)
+		require.Equal(t, "BAD_PROMPT", traceRecorder.result.ErrorCode)
+	})
+
+	t.Run("expired provider records failed terminal", func(t *testing.T) {
+		repo := newFakeBatchImageRepository()
+		repo.jobs["imgbatch_flow"] = newJob(BatchImageJobStatusRunning)
+		provider := &fakeProcessorProvider{status: &BatchProviderStatus{InternalState: BatchProviderStateExpired, RawState: "EXPIRED"}}
+		traceRecorder := &fakeBatchImageTraceRecorder{}
+		processor := newTestBatchImageProcessor(repo, provider)
+		processor.TraceRecorder = traceRecorder
+
+		got, err := processor.Process(ctx, "imgbatch_flow")
+
+		require.NoError(t, err)
+		require.True(t, got.Terminal)
+		require.Equal(t, BatchImageJobStatusFailed, repo.jobs["imgbatch_flow"].Status)
+		require.Empty(t, traceRecorder.result.Items)
+		require.Equal(t, BatchImageJobStatusFailed, traceRecorder.result.Status)
+		require.Equal(t, "EXPIRED", traceRecorder.result.ProviderState)
+		require.Equal(t, "provider", traceRecorder.result.ErrorStage)
+		require.Equal(t, "PROVIDER_BATCH_EXPIRED", traceRecorder.result.ErrorCode)
+	})
+
+	t.Run("index parse failure records failed terminal", func(t *testing.T) {
+		repo := newFakeBatchImageRepository()
+		repo.jobs["imgbatch_flow"] = newJob(BatchImageJobStatusSubmitted)
+		provider := &fakeProcessorProvider{
+			status: &BatchProviderStatus{InternalState: BatchProviderStateSucceeded, RawState: "SUCCEEDED"},
+			result: "not-json\n",
+		}
+		traceRecorder := &fakeBatchImageTraceRecorder{}
+		processor := newTestBatchImageProcessor(repo, provider)
+		processor.TraceRecorder = traceRecorder
+
+		got, err := processor.Process(ctx, "imgbatch_flow")
+
+		require.NoError(t, err)
+		require.True(t, got.Terminal)
+		require.Equal(t, BatchImageJobStatusFailed, repo.jobs["imgbatch_flow"].Status)
+		require.Empty(t, traceRecorder.result.Items)
+		require.Equal(t, BatchImageJobStatusFailed, traceRecorder.result.Status)
+		require.Equal(t, "SUCCEEDED", traceRecorder.result.ProviderState)
+		require.Equal(t, "indexing", traceRecorder.result.ErrorStage)
+		require.Equal(t, "INDEX_PARSE_FAILED", traceRecorder.result.ErrorCode)
+	})
+
+	t.Run("terminal trace recorder panic preserves failed outcome", func(t *testing.T) {
+		repo := newFakeBatchImageRepository()
+		repo.jobs["imgbatch_flow"] = newJob(BatchImageJobStatusRunning)
+		provider := &fakeProcessorProvider{status: &BatchProviderStatus{InternalState: BatchProviderStateFailed, RawState: "FAILED", ErrorCode: "BAD_PROMPT"}}
+		processor := newTestBatchImageProcessor(repo, provider)
+		processor.TraceRecorder = &fakeBatchImageTraceRecorder{panicOnRecord: true}
+
+		got, err := processor.Process(ctx, "imgbatch_flow")
+
 		require.NoError(t, err)
 		require.True(t, got.Terminal)
 		require.Equal(t, BatchImageJobStatusFailed, repo.jobs["imgbatch_flow"].Status)
@@ -304,15 +395,22 @@ func TestBatchImageProviderProcessor_StatusFlow(t *testing.T) {
 		repo.jobs["imgbatch_flow"].APIKeyID = &apiKeyID
 		repo.jobs["imgbatch_flow"].EstimatedCost = holdAmount
 		repo.jobs["imgbatch_flow"].HoldAmount = &holdAmount
-		provider := &fakeProcessorProvider{status: &BatchProviderStatus{InternalState: BatchProviderStateCancelled, RawState: "CANCELLED"}}
+		provider := &fakeProcessorProvider{status: &BatchProviderStatus{InternalState: BatchProviderStateCancelled, RawState: "CANCELLED", ErrorCode: "GEMINI_BATCH_CANCELLED"}}
 		processor := newTestBatchImageProcessor(repo, provider)
 		billing := &fakeBatchImageBillingRepo{}
 		processor.BillingRepo = billing
+		traceRecorder := &fakeBatchImageTraceRecorder{}
+		processor.TraceRecorder = traceRecorder
 		got, err := processor.Process(ctx, "imgbatch_flow")
 		require.NoError(t, err)
 		require.True(t, got.Terminal)
 		require.Equal(t, BatchImageJobStatusCancelled, repo.jobs["imgbatch_flow"].Status)
 		require.Len(t, billing.releases, 1)
+		require.Empty(t, traceRecorder.result.Items)
+		require.Equal(t, BatchImageJobStatusCancelled, traceRecorder.result.Status)
+		require.Equal(t, "CANCELLED", traceRecorder.result.ProviderState)
+		require.Equal(t, "provider", traceRecorder.result.ErrorStage)
+		require.Equal(t, "GEMINI_BATCH_CANCELLED", traceRecorder.result.ErrorCode)
 		require.Equal(t, BatchImageReleaseRequestID("imgbatch_flow"), billing.releases[0].RequestID)
 	})
 }
@@ -330,6 +428,22 @@ func newTestBatchImageProcessor(repo *fakeBatchImageRepository, provider *fakePr
 		AccountResolver:  &fakeBatchImageAccountResolver{account: &Account{}},
 		Indexer:          &BatchImageResultIndexer{Repo: repo},
 	}
+}
+
+type fakeBatchImageTraceRecorder struct {
+	batchID       string
+	items         []CreateBatchImageItemParams
+	result        BatchImageTraceResult
+	panicOnRecord bool
+}
+
+func (r *fakeBatchImageTraceRecorder) RecordBatchImageResult(_ context.Context, job *BatchImageJob, result BatchImageTraceResult) {
+	if r.panicOnRecord {
+		panic("trace recorder failure")
+	}
+	r.batchID = job.BatchID
+	r.items = append(r.items, result.Items...)
+	r.result = result
 }
 
 type fakeBatchImageAccountResolver struct {

@@ -213,6 +213,8 @@ type OpenAIWSIngressHooks struct {
 	BeforeTurn          func(turn int) error
 	BeforeRequest       func(turn int, payload []byte, originalModel string) error
 	AfterTurn           func(turn int, result *OpenAIForwardResult, turnErr error)
+	AfterClientWrite    func(turn int, payload []byte, writeErr error)
+	ContextForTurn      func(turn int) context.Context
 }
 
 func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {

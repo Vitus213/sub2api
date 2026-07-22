@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
@@ -138,8 +139,9 @@ type BatchImageJob struct {
 	RequestHash    *string
 	ManifestHash   *string
 
-	RetryCount int
-	Version    int
+	RetryCount        int
+	Version           int
+	TraceContinuation *recording.TraceContinuation
 
 	OutputExpiresAt *time.Time
 	InputDeletedAt  *time.Time
@@ -197,7 +199,8 @@ type CreateBatchImageJobParams struct {
 	RequestHash    *string
 	ManifestHash   *string
 
-	RetryCount int
+	RetryCount        int
+	TraceContinuation *recording.TraceContinuation
 
 	OutputExpiresAt *time.Time
 }

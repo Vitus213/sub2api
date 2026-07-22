@@ -3,12 +3,17 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -142,4 +147,99 @@ func TestAsyncImageHandlerDisabledReturns404(t *testing.T) {
 
 	// No task was created / persisted.
 	require.Empty(t, store.tasks)
+}
+
+type pinnedImageTaskRecorder struct {
+	continuation recording.TraceContinuation
+	attempts     int
+}
+
+func (r *pinnedImageTaskRecorder) BeginAttempt(recording.AttemptMetadata, []byte) recording.Attempt {
+	r.attempts++
+	return pinnedImageTaskAttempt{}
+}
+
+func (r *pinnedImageTaskRecorder) TraceContinuation() recording.TraceContinuation {
+	return r.continuation
+}
+
+type pinnedImageTaskAttempt struct{}
+
+func (pinnedImageTaskAttempt) ObserveResponse(_ int, body io.ReadCloser) io.ReadCloser { return body }
+func (pinnedImageTaskAttempt) End(recording.AttemptResult)                             {}
+
+func TestAsyncImageRunReloadsCurrentTraceGeneration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	otlp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer otlp.Close()
+	manager, err := modeltrace.NewManager(context.Background(), config.ModelTracingConfig{
+		Enabled: true, Endpoint: otlp.URL + "/api/public/otel",
+		PublicKey: "current-public", SecretKey: "current-secret",
+		PromptMaxBytes: 4096, ResponseMaxBytes: 4096,
+	})
+	require.NoError(t, err)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, manager.Shutdown(shutdownCtx))
+	}()
+
+	oldContinuation := recording.TraceContinuation{
+		TraceID: strings.Repeat("1", 32), SpanID: strings.Repeat("2", 16),
+		TraceFlags: 1, GenerationFingerprint: strings.Repeat("3", 64),
+	}
+	oldRecorder := &pinnedImageTaskRecorder{continuation: oldContinuation}
+	requestContext := recording.WithRecorder(context.Background(), oldRecorder)
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations/async", strings.NewReader(`{"model":"gpt-image-1","prompt":"cat"}`)).WithContext(requestContext)
+	request.Header.Set("Content-Type", "application/json")
+	contextWriter := httptest.NewRecorder()
+	requestGinContext, _ := gin.CreateTestContext(contextWriter)
+	requestGinContext.Request = request
+	taskContext, taskWriter := newAsyncImageContext(requestGinContext, []byte(`{"model":"gpt-image-1","prompt":"cat"}`), requestContext)
+
+	store := &asyncImageMemoryStore{tasks: make(map[string]*service.ImageTaskRecord)}
+	tasks := service.NewImageTaskServiceWithUploader(store, nil, time.Hour, time.Minute)
+	task, err := tasks.Create(context.Background(), service.ImageTaskOwner{UserID: 7, APIKeyID: 9})
+	require.NoError(t, err)
+	openAI := &OpenAIGatewayHandler{}
+	openAI.SetModelTraceManager(manager)
+	h := &AsyncImageHandler{tasks: tasks, openAI: openAI}
+	var executionContinuation recording.TraceContinuation
+	h.execute = func(_ string, c *gin.Context) {
+		var ok bool
+		executionContinuation, ok = recording.ContinuationFromContext(c.Request.Context())
+		require.True(t, ok)
+		attempt := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{Provider: "openai"}, []byte(`{"prompt":"cat"}`))
+		attempt.End(recording.AttemptResult{HTTPStatus: http.StatusOK, Output: []byte(`{"ok":true}`)})
+		c.JSON(http.StatusOK, gin.H{"data": []gin.H{{"url": "https://example.test/image.png"}}})
+	}
+
+	h.run(task.ID, service.PlatformOpenAI, "gpt-image-1", "application/json", []byte(`{"model":"gpt-image-1","prompt":"cat"}`), oldContinuation,
+		middleware2.ResolvedIdentity{UserID: 7, APIKeyID: 9}, taskContext, taskWriter)
+
+	require.Zero(t, oldRecorder.attempts, "background execution must not reuse the submission recorder")
+	require.NotEqual(t, oldContinuation.GenerationFingerprint, executionContinuation.GenerationFingerprint)
+	completed, err := tasks.Get(context.Background(), service.ImageTaskOwner{UserID: 7, APIKeyID: 9}, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.ImageTaskStatusCompleted, completed.Status)
+
+	require.NoError(t, manager.ApplySnapshot(context.Background(), modeltrace.ConfigSnapshot{
+		Config: config.ModelTracingConfig{}, Source: modeltrace.ConfigSourceRuntime, ConfigVersion: 1,
+	}))
+	disabledTask, err := tasks.Create(context.Background(), service.ImageTaskOwner{UserID: 7, APIKeyID: 9})
+	require.NoError(t, err)
+	disabledContext, disabledWriter := newAsyncImageContext(requestGinContext, []byte(`{"model":"gpt-image-1","prompt":"cat"}`), requestContext)
+	backgroundHasRecorder := true
+	h.execute = func(_ string, c *gin.Context) {
+		_, backgroundHasRecorder = recording.ContinuationFromContext(c.Request.Context())
+		attempt := recording.BeginAttempt(c.Request.Context(), recording.AttemptMetadata{Provider: "openai"}, nil)
+		attempt.End(recording.AttemptResult{HTTPStatus: http.StatusOK})
+		c.JSON(http.StatusOK, gin.H{"data": []gin.H{{"url": "https://example.test/image-disabled.png"}}})
+	}
+	h.run(disabledTask.ID, service.PlatformOpenAI, "gpt-image-1", "application/json", nil, oldContinuation,
+		middleware2.ResolvedIdentity{UserID: 7, APIKeyID: 9}, disabledContext, disabledWriter)
+	require.False(t, backgroundHasRecorder, "disabled current generation must make background tracing a no-op")
+	require.Zero(t, oldRecorder.attempts, "disabled execution must not fall back to the submission recorder")
 }

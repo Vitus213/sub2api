@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -73,8 +74,15 @@ func TestOpenAIGatewayService_ForwardCountTokensAsAnthropic_APIKeyUsesResponsesI
 		Schedulable: true,
 	}
 
-	err := svc.ForwardCountTokensAsAnthropic(context.Background(), c, account, body, "gpt-5.3-codex")
+	baseCtx := context.Background()
+	activationCount := 0
+	ctx := recording.WithDeferredActivator(baseCtx, func() context.Context {
+		activationCount++
+		return baseCtx
+	})
+	err := svc.ForwardCountTokensAsAnthropic(ctx, c, account, body, "gpt-5.3-codex")
 	require.NoError(t, err)
+	require.Equal(t, 1, activationCount, "actual upstream send must activate deferred model tracing")
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, `{"input_tokens":42}`, rec.Body.String())
 	require.NotNil(t, upstream.lastReq)

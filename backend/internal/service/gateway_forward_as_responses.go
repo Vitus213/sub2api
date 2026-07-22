@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -385,6 +386,11 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	startTime time.Time,
 ) (*ForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
+	traceCtx := context.Background()
+	if c.Request != nil {
+		traceCtx = c.Request.Context()
+	}
+	recording.BeginStream(traceCtx)
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -400,6 +406,8 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
+	sawTerminalEvent := false
+	var clientWriteErr error
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -423,6 +431,9 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 
 	// processEvent handles a single parsed Anthropic SSE event.
 	processEvent := func(event *apicompat.AnthropicStreamEvent) bool {
+		if event.Type == "message_stop" {
+			sawTerminalEvent = true
+		}
 		if firstChunk {
 			firstChunk = false
 			ms := int(time.Since(startTime).Milliseconds())
@@ -451,6 +462,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 			}
 			out := string(reverseToolNamesIfPresent(c, []byte(sse)))
 			if _, err := fmt.Fprint(c.Writer, out); err != nil {
+				clientWriteErr = err
 				logger.L().Info("forward_as_responses stream: client disconnected",
 					zap.String("request_id", requestID),
 				)
@@ -507,6 +519,9 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		}
 
 		if processEvent(&event) {
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamClientDisconnected, ErrorStage: "downstream_write", Err: clientWriteErr,
+			})
 			return resultWithUsage(), nil
 		}
 	}
@@ -518,8 +533,27 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 				zap.String("request_id", requestID),
 			)
 		}
+		status := recording.StreamError
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = recording.StreamCancelled
+		}
+		recording.EndStream(traceCtx, recording.StreamOutcome{Status: status, ErrorStage: "upstream_read", Err: err})
+		return finalizeStream()
 	}
 
+	if !sawTerminalEvent {
+		if err := traceCtx.Err(); err != nil {
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamCancelled, ErrorStage: "upstream_read", Err: err,
+			})
+		} else {
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamError, ErrorStage: "upstream_protocol", Err: io.ErrUnexpectedEOF,
+			})
+		}
+	} else {
+		recording.EndStream(traceCtx, recording.StreamOutcome{Status: recording.StreamCompleted})
+	}
 	return finalizeStream()
 }
 

@@ -3,6 +3,7 @@ package routes
 
 import (
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	adminhandler "github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -65,6 +66,9 @@ func RegisterAdminRoutes(
 
 		// 系统设置
 		registerSettingsRoutes(admin, h)
+
+		// 模型请求 OTEL 追踪
+		adminhandler.RegisterModelTracingRoutes(admin)
 
 		// 数据管理
 		registerDataManagementRoutes(admin, h, stepUpAuth)

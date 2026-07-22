@@ -85,6 +85,18 @@ services:
       - SETUP_MIGRATION_TIMEOUT_SECONDS=${SETUP_MIGRATION_TIMEOUT_SECONDS:-0}
 
       # =======================================================================
+      # Model Request Tracing (Langfuse OTLP, Optional)
+      # =======================================================================
+      - MODEL_TRACING_ENABLED=${MODEL_TRACING_ENABLED:-false}
+      - MODEL_TRACING_ENDPOINT=${MODEL_TRACING_ENDPOINT:-}
+      - MODEL_TRACING_PUBLIC_KEY=${MODEL_TRACING_PUBLIC_KEY:-}
+      - MODEL_TRACING_SECRET_KEY=${MODEL_TRACING_SECRET_KEY:-}
+      - MODEL_TRACING_PROMPT_MAX_BYTES=${MODEL_TRACING_PROMPT_MAX_BYTES:-1048576}
+      - MODEL_TRACING_RESPONSE_MAX_BYTES=${MODEL_TRACING_RESPONSE_MAX_BYTES:-1048576}
+      - MODEL_TRACING_MEDIA_MAX_BYTES=${MODEL_TRACING_MEDIA_MAX_BYTES:-1048576}
+      - MODEL_TRACING_CAPTURE_MEDIA_CONTENT=${MODEL_TRACING_CAPTURE_MEDIA_CONTENT:-false}
+
+      # =======================================================================
       # Timezone Configuration
       # =======================================================================
       - TZ=${TZ:-Asia/Shanghai}

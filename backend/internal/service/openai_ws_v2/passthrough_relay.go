@@ -498,8 +498,8 @@ func runUpstreamToClient(
 		case coderws.MessageBinary:
 			// binary frame 直接透传，不进入 JSON 观测路径（避免无效解析开销）。
 		}
-		emitTurnComplete(onTurnComplete, state, observedEvent)
 		if dropDownstreamWrites != nil && dropDownstreamWrites.Load() {
+			emitTurnComplete(onTurnComplete, state, observedEvent)
 			if droppedFrames != nil {
 				droppedFrames.Add(1)
 			}
@@ -528,6 +528,7 @@ func runUpstreamToClient(
 		if afterClientWrite != nil {
 			afterClientWrite(msgType, payload, writeErr)
 		}
+		emitTurnComplete(onTurnComplete, state, observedEvent)
 		if writeErr != nil {
 			emitRelayTrace(onTrace, RelayTraceEvent{
 				Stage:           "write_client_failed",

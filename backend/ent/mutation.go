@@ -52,6 +52,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 )
 
 const (
@@ -11347,6 +11348,7 @@ type BatchImageJobMutation struct {
 	addretry_count      *int
 	version             *int
 	addversion          *int
+	trace_continuation  *recording.TraceContinuation
 	output_expires_at   *time.Time
 	input_deleted_at    *time.Time
 	output_deleted_at   *time.Time
@@ -12849,6 +12851,55 @@ func (m *BatchImageJobMutation) ResetVersion() {
 	m.addversion = nil
 }
 
+// SetTraceContinuation sets the "trace_continuation" field.
+func (m *BatchImageJobMutation) SetTraceContinuation(rc recording.TraceContinuation) {
+	m.trace_continuation = &rc
+}
+
+// TraceContinuation returns the value of the "trace_continuation" field in the mutation.
+func (m *BatchImageJobMutation) TraceContinuation() (r recording.TraceContinuation, exists bool) {
+	v := m.trace_continuation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTraceContinuation returns the old "trace_continuation" field's value of the BatchImageJob entity.
+// If the BatchImageJob object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BatchImageJobMutation) OldTraceContinuation(ctx context.Context) (v recording.TraceContinuation, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTraceContinuation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTraceContinuation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTraceContinuation: %w", err)
+	}
+	return oldValue.TraceContinuation, nil
+}
+
+// ClearTraceContinuation clears the value of the "trace_continuation" field.
+func (m *BatchImageJobMutation) ClearTraceContinuation() {
+	m.trace_continuation = nil
+	m.clearedFields[batchimagejob.FieldTraceContinuation] = struct{}{}
+}
+
+// TraceContinuationCleared returns if the "trace_continuation" field was cleared in this mutation.
+func (m *BatchImageJobMutation) TraceContinuationCleared() bool {
+	_, ok := m.clearedFields[batchimagejob.FieldTraceContinuation]
+	return ok
+}
+
+// ResetTraceContinuation resets all changes to the "trace_continuation" field.
+func (m *BatchImageJobMutation) ResetTraceContinuation() {
+	m.trace_continuation = nil
+	delete(m.clearedFields, batchimagejob.FieldTraceContinuation)
+}
+
 // SetOutputExpiresAt sets the "output_expires_at" field.
 func (m *BatchImageJobMutation) SetOutputExpiresAt(t time.Time) {
 	m.output_expires_at = &t
@@ -13494,7 +13545,7 @@ func (m *BatchImageJobMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *BatchImageJobMutation) Fields() []string {
-	fields := make([]string, 0, 40)
+	fields := make([]string, 0, 41)
 	if m.batch_id != nil {
 		fields = append(fields, batchimagejob.FieldBatchID)
 	}
@@ -13575,6 +13626,9 @@ func (m *BatchImageJobMutation) Fields() []string {
 	}
 	if m.version != nil {
 		fields = append(fields, batchimagejob.FieldVersion)
+	}
+	if m.trace_continuation != nil {
+		fields = append(fields, batchimagejob.FieldTraceContinuation)
 	}
 	if m.output_expires_at != nil {
 		fields = append(fields, batchimagejob.FieldOutputExpiresAt)
@@ -13677,6 +13731,8 @@ func (m *BatchImageJobMutation) Field(name string) (ent.Value, bool) {
 		return m.RetryCount()
 	case batchimagejob.FieldVersion:
 		return m.Version()
+	case batchimagejob.FieldTraceContinuation:
+		return m.TraceContinuation()
 	case batchimagejob.FieldOutputExpiresAt:
 		return m.OutputExpiresAt()
 	case batchimagejob.FieldInputDeletedAt:
@@ -13766,6 +13822,8 @@ func (m *BatchImageJobMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldRetryCount(ctx)
 	case batchimagejob.FieldVersion:
 		return m.OldVersion(ctx)
+	case batchimagejob.FieldTraceContinuation:
+		return m.OldTraceContinuation(ctx)
 	case batchimagejob.FieldOutputExpiresAt:
 		return m.OldOutputExpiresAt(ctx)
 	case batchimagejob.FieldInputDeletedAt:
@@ -13989,6 +14047,13 @@ func (m *BatchImageJobMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetVersion(v)
+		return nil
+	case batchimagejob.FieldTraceContinuation:
+		v, ok := value.(recording.TraceContinuation)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTraceContinuation(v)
 		return nil
 	case batchimagejob.FieldOutputExpiresAt:
 		v, ok := value.(time.Time)
@@ -14297,6 +14362,9 @@ func (m *BatchImageJobMutation) ClearedFields() []string {
 	if m.FieldCleared(batchimagejob.FieldManifestHash) {
 		fields = append(fields, batchimagejob.FieldManifestHash)
 	}
+	if m.FieldCleared(batchimagejob.FieldTraceContinuation) {
+		fields = append(fields, batchimagejob.FieldTraceContinuation)
+	}
 	if m.FieldCleared(batchimagejob.FieldOutputExpiresAt) {
 		fields = append(fields, batchimagejob.FieldOutputExpiresAt)
 	}
@@ -14382,6 +14450,9 @@ func (m *BatchImageJobMutation) ClearField(name string) error {
 		return nil
 	case batchimagejob.FieldManifestHash:
 		m.ClearManifestHash()
+		return nil
+	case batchimagejob.FieldTraceContinuation:
+		m.ClearTraceContinuation()
 		return nil
 	case batchimagejob.FieldOutputExpiresAt:
 		m.ClearOutputExpiresAt()
@@ -14504,6 +14575,9 @@ func (m *BatchImageJobMutation) ResetField(name string) error {
 		return nil
 	case batchimagejob.FieldVersion:
 		m.ResetVersion()
+		return nil
+	case batchimagejob.FieldTraceContinuation:
+		m.ResetTraceContinuation()
 		return nil
 	case batchimagejob.FieldOutputExpiresAt:
 		m.ResetOutputExpiresAt()

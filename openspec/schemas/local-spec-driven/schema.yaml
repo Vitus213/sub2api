@@ -1,0 +1,57 @@
+name: local-spec-driven
+version: 1
+description: 中文规格驱动工作流
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: 解释变更原因、能力边界与影响
+    template: proposal.md
+    instruction: |
+      创建 proposal.md，说明为什么现在需要变更、具体变化、新增或修改的能力，以及影响范围。
+      capability 使用 kebab-case，并与后续 specs/<capability>/spec.md 一一对应。
+      聚焦 why，不写锁、表、类或缓存等技术实现。
+    requires: []
+
+  - id: specs
+    generates: "specs/**/*.md"
+    description: 定义每项能力的可观察行为和验收场景
+    template: specs/spec.md
+    instruction: |
+      为 proposal 中每个 capability 创建 specs/<capability>/spec.md。
+      只写可观察行为、输入、输出、状态变化和错误条件；内部技术实现进入 design.md。
+      使用 ADDED、MODIFIED、REMOVED、RENAMED Requirements。
+      每个 ### Requirement: 至少包含一个严格四级 #### Scenario:，场景使用 WHEN/THEN。
+      MODIFIED 必须给出完整 Requirement；REMOVED 必须包含 Reason 与 Migration。
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: 记录技术方案、决策理由与迁移回滚
+    template: design.md
+    instruction: |
+      基于 proposal 与全部 specs 创建 design.md，解释如何实现且不改写已确认行为。
+      记录上下文、目标/非目标、关键决策与备选方案、数据与并发边界、风险/取舍、迁移与回滚、未决问题。
+      数据库、缓存、锁、类、表字段和部署机制放在这里，不能挤入 specs。
+    requires:
+      - proposal
+      - specs
+
+  - id: tasks
+    generates: tasks.md
+    description: 把规格拆成可独立验证的垂直切片
+    template: tasks.md
+    instruction: |
+      使用编号分组和 - [ ] X.Y checkbox。
+      每项引用明确的 Requirement/Scenario，覆盖该行为所需的测试、最小实现与验证，形成垂直切片。
+      写出具体验证命令并按依赖排序；不得按 controller、service、database 水平分层。
+    requires:
+      - specs
+      - design
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    每次只把一个已闭合的垂直切片交给 TDD。
+    规格信息不足或实现发现规格错误时停止实现，先回写当前 change 并重新确认。

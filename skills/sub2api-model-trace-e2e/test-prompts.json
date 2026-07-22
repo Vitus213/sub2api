@@ -1,0 +1,63 @@
+[
+  {
+    "id": "typical-success",
+    "prompt": "跑一下模型追踪的端到端测试，验证 Langfuse 能收到 trace",
+    "should_trigger": true,
+    "expected_behavior": "启动 Langfuse + sub2api deps + 编译并启动 sub2api，先验证部署/运行时配置闭环，再发匿名、未知 Key、已鉴权控制面、有效 Key 503、disabled Key 401 五类请求；ClickHouse 中前三类均为 0 Trace，后两类各为 1 条 Trace/1 个根 SPAN 且没有虚构 GENERATION，最终输出 VERIFY_OK",
+    "assertions": [
+      "stdout 最后三行为 trace_id、1、VERIFY_OK",
+      "部署配置响应不含 secret；有效运行时配置版本递增，非秘密更新保留 secret，过期版本返回 409",
+      "远端非回环 HTTP endpoint 更新返回 400，旧配置保持不变",
+      "匿名请求、未知 API Key、已鉴权 /v1/models 控制面均导出 0 Trace",
+      "有效 Key 的 503 与 disabled Key 的 401 各导出 1 条 Trace/1 个 ERROR 根 SPAN且没有 GENERATION",
+      "有效 Key trace metadata 含正确 api_key_id、group_id、request_id，session_id 与请求一致",
+      "disabled Key trace metadata 含已解析的 user_id、api_key_id 与 group_id"
+    ]
+  },
+  {
+    "id": "503-still-traced",
+    "prompt": "没配上游账号的情况下发个 chat completions，trace 应该照常到 Langfuse",
+    "should_trigger": true,
+    "expected_behavior": "请求返回 503（Service temporarily unavailable），但 Langfuse 仍收到 1 条 trace 和 1 个 ERROR 根 SPAN；尚未发生真实上游发送，因此不得虚构 GENERATION。根 Span 的 output 是 503 错误 JSON。这是 fail-open 旁路的验证点，不应尝试修复 503。",
+    "assertions": [
+      "HTTP 响应码为 503",
+      "Langfuse ClickHouse traces 表返回 1 条匹配 session_id 的记录，observations 恰为 1 且 GENERATION 为 0",
+      "根 Span output 包含 'Service temporarily unavailable'",
+      "不出现修复 503 的尝试（如配置上游账号、改 Handler 逻辑）"
+    ]
+  },
+  {
+    "id": "port-conflict-failure",
+    "prompt": "3000 端口被占了的情况下跑端到端测试",
+    "should_trigger": true,
+    "expected_behavior": "脚本清理自身命名的 e2e 容器后检测到 3000 端口仍被占用，立即非零退出并报告具体端口和 lsof 恢复命令；不得删除未知容器、kill 占用进程或静默换端口。",
+    "assertions": [
+      "脚本非零退出",
+      "stderr 含 [e2e][ERROR] 行",
+      "不出现 kill -9 或 docker rm 其他容器的操作",
+      "不出现自动换端口行为"
+    ]
+  },
+  {
+    "id": "negative-unit-test-only",
+    "prompt": "只跑 modeltrace 的 Go 单元测试，不用启动 Langfuse",
+    "should_trigger": false,
+    "expected_behavior": "不触发本 skill 的 run_e2e.sh。主 agent 直接用 colima 跑 go test ./internal/modeltrace/... -count=1。本 skill 的 SKILL.md 场景四明确把这种情况路由掉。",
+    "assertions": [
+      "不启动 docker compose",
+      "不调用 run_e2e.sh",
+      "直接运行 go test 命令"
+    ]
+  },
+  {
+    "id": "negative-antcode",
+    "prompt": "帮我在 antcode 上给 sub2api 提个 PR 把 OTEL 改动合进去",
+    "should_trigger": false,
+    "expected_behavior": "项目 AGENTS.md 规定本仓库用 GitHub，不触发 antcode-skill。应提示用户本仓库远端是 GitHub（Vitus213/sub2api），跨 fork PR 用 gh pr create --repo Wei-Shaw/sub2api。",
+    "assertions": [
+      "不调用 antcode CLI",
+      "明确说明本仓库远端是 GitHub",
+      "建议用 gh CLI"
+    ]
+  }
+]

@@ -152,8 +152,13 @@ func startPassthroughLifecycleServer(
 	controlCtx context.Context,
 	svc *OpenAIGatewayService,
 	account *Account,
+	hooks ...*OpenAIWSIngressHooks,
 ) (*httptest.Server, <-chan error) {
 	t.Helper()
+	var relayHooks *OpenAIWSIngressHooks
+	if len(hooks) > 0 {
+		relayHooks = hooks[0]
+	}
 	serverErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
@@ -184,7 +189,7 @@ func startPassthroughLifecycleServer(
 		req := r.Clone(controlCtx)
 		req.Header = req.Header.Clone()
 		ginCtx.Request = req
-		serverErr <- svc.ProxyResponsesWebSocketFromClient(controlCtx, ginCtx, conn, account, "sk-test", firstMessage, nil)
+		serverErr <- svc.ProxyResponsesWebSocketFromClient(controlCtx, ginCtx, conn, account, "sk-test", firstMessage, relayHooks)
 	}))
 	return server, serverErr
 }
@@ -256,6 +261,124 @@ func TestOpenAIWSPassthroughTurnLifecycle_SerializesTerminalCommitAndNextTurn(t 
 		t.Error("failed terminal write must not commit idle state")
 	})
 	require.False(t, <-admitted, "failed terminal write must keep the current turn in flight")
+}
+
+func TestPassthroughLifecycle_SuccessfulTerminalWriteStaysOnCurrentTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type callbackEvent struct {
+		kind     string
+		turn     int
+		result   *OpenAIForwardResult
+		writeErr error
+		turnErr  error
+	}
+
+	callbacks := make(chan callbackEvent, 3)
+	hooks := &OpenAIWSIngressHooks{
+		AfterClientWrite: func(turn int, _ []byte, writeErr error) {
+			callbacks <- callbackEvent{kind: "client_write", turn: turn, writeErr: writeErr}
+		},
+		AfterTurn: func(turn int, result *OpenAIForwardResult, turnErr error) {
+			callbacks <- callbackEvent{kind: "turn", turn: turn, result: result, turnErr: turnErr}
+		},
+	}
+	controlCtx, cancelControl := context.WithCancelCause(context.Background())
+	defer cancelControl(context.Canceled)
+	upstream := newStagedPassthroughConn()
+	upstream.Send(`{"type":"response.completed","response":{"id":"resp_write_ok","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)
+	server, serverErr := startPassthroughLifecycleServer(
+		t,
+		controlCtx,
+		newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream),
+		passthroughLifecycleAccount(),
+		hooks,
+	)
+	defer server.Close()
+	clientConn := dialPassthroughLifecycleClient(t, server)
+	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
+
+	terminal, err := readPassthroughLifecycleFrame(t, clientConn, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "resp_write_ok", gjson.GetBytes(terminal, "response.id").String())
+	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+	select {
+	case err = <-serverErr:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("passthrough successful terminal turn did not stop after client close")
+	}
+
+	got := make([]callbackEvent, 0, len(callbacks))
+	for len(callbacks) > 0 {
+		got = append(got, <-callbacks)
+	}
+	require.Len(t, got, 2, "connection finalization must not synthesize a turn 2 callback")
+	require.Equal(t, "client_write", got[0].kind)
+	require.Equal(t, 1, got[0].turn)
+	require.NoError(t, got[0].writeErr)
+	require.Equal(t, "turn", got[1].kind)
+	require.Equal(t, 1, got[1].turn)
+	require.NotNil(t, got[1].result)
+	require.NoError(t, got[1].turnErr)
+}
+
+func TestPassthroughLifecycle_FailedTerminalWriteStaysOnCurrentTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type callbackEvent struct {
+		kind     string
+		turn     int
+		result   *OpenAIForwardResult
+		writeErr error
+		turnErr  error
+	}
+
+	callbacks := make(chan callbackEvent, 4)
+	hooks := &OpenAIWSIngressHooks{
+		AfterClientWrite: func(turn int, _ []byte, writeErr error) {
+			callbacks <- callbackEvent{kind: "client_write", turn: turn, writeErr: writeErr}
+		},
+		AfterTurn: func(turn int, result *OpenAIForwardResult, turnErr error) {
+			callbacks <- callbackEvent{kind: "turn", turn: turn, result: result, turnErr: turnErr}
+		},
+	}
+	controlCtx, cancelControl := context.WithCancelCause(context.Background())
+	defer cancelControl(context.Canceled)
+	upstream := newStagedPassthroughConn()
+	server, serverErr := startPassthroughLifecycleServer(
+		t,
+		controlCtx,
+		newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream),
+		passthroughLifecycleAccount(),
+		hooks,
+	)
+	defer server.Close()
+	clientConn := dialPassthroughLifecycleClient(t, server)
+	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
+
+	require.NoError(t, clientConn.CloseNow())
+	time.Sleep(100 * time.Millisecond)
+	terminalPayload := `{"type":"response.completed","padding":"` + strings.Repeat("x", 8<<20) + `","response":{"id":"resp_write_failed","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`
+	upstream.Send(terminalPayload)
+
+	select {
+	case err := <-serverErr:
+		require.Error(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("passthrough terminal write failure did not stop relay")
+	}
+
+	got := make([]callbackEvent, 0, len(callbacks))
+	for len(callbacks) > 0 {
+		got = append(got, <-callbacks)
+	}
+	require.Len(t, got, 2, "connection finalization must not synthesize a turn 2 callback")
+	require.Equal(t, "client_write", got[0].kind)
+	require.Equal(t, 1, got[0].turn)
+	require.Error(t, got[0].writeErr)
+	require.Equal(t, "turn", got[1].kind)
+	require.Equal(t, 1, got[1].turn)
+	require.NotNil(t, got[1].result, "business completion should retain terminal usage")
+	require.NoError(t, got[1].turnErr)
 }
 
 func TestPassthroughLifecycle_LeaseLossSendsRetryClose(t *testing.T) {

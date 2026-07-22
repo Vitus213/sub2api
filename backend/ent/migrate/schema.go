@@ -544,6 +544,7 @@ var (
 		{Name: "manifest_hash", Type: field.TypeString, Nullable: true, Size: 128},
 		{Name: "retry_count", Type: field.TypeInt, Default: 0},
 		{Name: "version", Type: field.TypeInt, Default: 0},
+		{Name: "trace_continuation", Type: field.TypeJSON, Nullable: true},
 		{Name: "output_expires_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
 		{Name: "input_deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
 		{Name: "output_deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
@@ -572,7 +573,7 @@ var (
 			{
 				Name:    "batchimagejob_user_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{BatchImageJobsColumns[2], BatchImageJobsColumns[35]},
+				Columns: []*schema.Column{BatchImageJobsColumns[2], BatchImageJobsColumns[36]},
 			},
 			{
 				Name:    "batchimagejob_status",
@@ -603,17 +604,17 @@ var (
 			{
 				Name:    "batchimagejob_output_expires_at",
 				Unique:  false,
-				Columns: []*schema.Column{BatchImageJobsColumns[28]},
+				Columns: []*schema.Column{BatchImageJobsColumns[29]},
 			},
 			{
 				Name:    "batchimagejob_downloaded_at",
 				Unique:  false,
-				Columns: []*schema.Column{BatchImageJobsColumns[31]},
+				Columns: []*schema.Column{BatchImageJobsColumns[32]},
 			},
 			{
 				Name:    "batchimagejob_user_deleted_at",
 				Unique:  false,
-				Columns: []*schema.Column{BatchImageJobsColumns[32]},
+				Columns: []*schema.Column{BatchImageJobsColumns[33]},
 			},
 		},
 	}

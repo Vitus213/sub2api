@@ -358,6 +358,7 @@ func SetOpsFallbackAPIKey(c *gin.Context, apiKey *service.APIKey) {
 		return
 	}
 	c.Set(string(ContextKeyOpsFallbackAPIKey), apiKey)
+	notifyIdentityEstablished(c, resolvedIdentityFromAPIKey(apiKey))
 }
 
 // GetOpsFallbackAPIKey 读取 Ops 错误日志专用的回退 API Key。

@@ -46,6 +46,24 @@ func (r *BatchImageAccountRepositoryResolver) ResolveBatchImageAccount(ctx conte
 	return r.Repo.GetByID(ctx, accountID)
 }
 
+// BatchImageTraceResult describes either one job-level terminal or the
+// item-level results produced by a successful provider batch. Empty Items
+// means the recorder must emit one job-level result without inventing an item.
+type BatchImageTraceResult struct {
+	Items         []CreateBatchImageItemParams
+	Status        string
+	ProviderState string
+	ErrorStage    string
+	ErrorCode     string
+}
+
+// BatchImageTraceRecorder records provider results without coupling the
+// service package to a concrete telemetry backend. Implementations must fail
+// open: tracing must never change batch processing outcomes.
+type BatchImageTraceRecorder interface {
+	RecordBatchImageResult(context.Context, *BatchImageJob, BatchImageTraceResult)
+}
+
 type BatchImageProviderProcessor struct {
 	Repo             BatchImageRepository
 	ProviderRegistry *BatchImageProviderRegistry
@@ -53,6 +71,7 @@ type BatchImageProviderProcessor struct {
 	Indexer          *BatchImageResultIndexer
 	BillingRepo      UsageBillingRepository
 	AuthCache        APIKeyAuthCacheInvalidator
+	TraceRecorder    BatchImageTraceRecorder
 	DefaultRequeue   time.Duration
 }
 
@@ -91,7 +110,7 @@ func (p *BatchImageProviderProcessor) Process(ctx context.Context, batchID strin
 	}
 
 	if job.Status == BatchImageJobStatusIndexing {
-		return p.indexAndSettle(ctx, job, provider, account)
+		return p.indexAndSettle(ctx, job, provider, account, string(BatchProviderStateSucceeded))
 	}
 
 	status, err := provider.Get(ctx, job, account)
@@ -109,6 +128,10 @@ func (p *BatchImageProviderProcessor) Process(ctx context.Context, batchID strin
 	}
 	if err := p.persistProviderOutputRef(ctx, job, status.ProviderOutputRef); err != nil {
 		return BatchImageProcessResult{}, err
+	}
+	providerState := strings.TrimSpace(status.RawState)
+	if providerState == "" {
+		providerState = string(status.InternalState)
 	}
 
 	switch status.InternalState {
@@ -135,7 +158,7 @@ func (p *BatchImageProviderProcessor) Process(ctx context.Context, batchID strin
 			}
 			job.Status = BatchImageJobStatusIndexing
 		}
-		return p.indexAndSettle(ctx, job, provider, account)
+		return p.indexAndSettle(ctx, job, provider, account, providerState)
 	case BatchProviderStateFailed, BatchProviderStateExpired:
 		code := strings.TrimSpace(status.ErrorCode)
 		if code == "" && status.InternalState == BatchProviderStateExpired {
@@ -154,18 +177,34 @@ func (p *BatchImageProviderProcessor) Process(ctx context.Context, batchID strin
 			return BatchImageProcessResult{}, err
 		}
 		job.Status = BatchImageJobStatusFailed
+		p.recordBatchImageTrace(ctx, job, BatchImageTraceResult{
+			Status:        BatchImageJobStatusFailed,
+			ProviderState: providerState,
+			ErrorStage:    "provider",
+			ErrorCode:     code,
+		})
 		if err := p.releaseTerminalHold(ctx, job); err != nil {
 			return BatchImageProcessResult{}, err
 		}
 		return BatchImageProcessResult{Terminal: true}, nil
 	case BatchProviderStateCancelled:
+		code := strings.TrimSpace(status.ErrorCode)
+		if code == "" {
+			code = "PROVIDER_BATCH_CANCELLED"
+		}
 		if err := p.Repo.TransitionBatchImageJobStatus(ctx, job.BatchID, BatchImageJobStatusCancelled, BatchImageTransitionOptions{
 			EventType:    "job_failed",
-			EventPayload: map[string]any{"provider_state": status.RawState, "error_code": "PROVIDER_BATCH_CANCELLED"},
+			EventPayload: map[string]any{"provider_state": status.RawState, "error_code": code},
 		}); err != nil {
 			return BatchImageProcessResult{}, err
 		}
 		job.Status = BatchImageJobStatusCancelled
+		p.recordBatchImageTrace(ctx, job, BatchImageTraceResult{
+			Status:        BatchImageJobStatusCancelled,
+			ProviderState: providerState,
+			ErrorStage:    "provider",
+			ErrorCode:     code,
+		})
 		if err := p.releaseTerminalHold(ctx, job); err != nil {
 			return BatchImageProcessResult{}, err
 		}
@@ -175,7 +214,7 @@ func (p *BatchImageProviderProcessor) Process(ctx context.Context, batchID strin
 	}
 }
 
-func (p *BatchImageProviderProcessor) indexAndSettle(ctx context.Context, job *BatchImageJob, provider BatchImageProvider, account *Account) (BatchImageProcessResult, error) {
+func (p *BatchImageProviderProcessor) indexAndSettle(ctx context.Context, job *BatchImageJob, provider BatchImageProvider, account *Account, providerState string) (BatchImageProcessResult, error) {
 	indexer := p.Indexer
 	if indexer == nil {
 		indexer = &BatchImageResultIndexer{Repo: p.Repo}
@@ -185,6 +224,9 @@ func (p *BatchImageProviderProcessor) indexAndSettle(ctx context.Context, job *B
 	}
 
 	result, err := indexer.Index(ctx, job, provider, account)
+	if err == nil {
+		p.recordBatchImageTrace(ctx, job, BatchImageTraceResult{Items: result.items, ProviderState: providerState})
+	}
 	if err != nil {
 		if errors.Is(err, ErrBatchImageIndexOutputMissing) {
 			return BatchImageProcessResult{}, err
@@ -209,6 +251,12 @@ func (p *BatchImageProviderProcessor) indexAndSettle(ctx context.Context, job *B
 			return BatchImageProcessResult{}, transitionErr
 		}
 		job.Status = BatchImageJobStatusFailed
+		p.recordBatchImageTrace(ctx, job, BatchImageTraceResult{
+			Status:        BatchImageJobStatusFailed,
+			ProviderState: providerState,
+			ErrorStage:    "indexing",
+			ErrorCode:     code,
+		})
 		if err := p.releaseTerminalHold(ctx, job); err != nil {
 			return BatchImageProcessResult{}, err
 		}
@@ -226,6 +274,21 @@ func (p *BatchImageProviderProcessor) indexAndSettle(ctx context.Context, job *B
 		return BatchImageProcessResult{}, err
 	}
 	return BatchImageProcessResult{RequeueAfter: time.Millisecond}, nil
+}
+
+func (p *BatchImageProviderProcessor) recordBatchImageTrace(ctx context.Context, job *BatchImageJob, result BatchImageTraceResult) {
+	if p == nil || p.TraceRecorder == nil || job == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.L().Warn("batch_image.model_trace_recorder_panicked",
+				zap.String("batch_id", job.BatchID),
+				zap.Any("panic", recovered),
+			)
+		}
+	}()
+	p.TraceRecorder.RecordBatchImageResult(ctx, job, result)
 }
 
 func (p *BatchImageProviderProcessor) releaseTerminalHold(ctx context.Context, job *BatchImageJob) error {
@@ -277,6 +340,7 @@ type BatchImageIndexResult struct {
 	SuccessCount int
 	FailCount    int
 	TotalCount   int
+	items        []CreateBatchImageItemParams
 }
 
 type BatchImageResultIndexer struct {
@@ -416,6 +480,7 @@ func (i *BatchImageResultIndexer) Index(ctx context.Context, job *BatchImageJob,
 	}); err != nil {
 		return nil, err
 	}
+	result.items = items
 	return result, nil
 }
 

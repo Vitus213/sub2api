@@ -5,6 +5,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -21,12 +22,22 @@ func RegisterGatewayRoutes(
 	opsService *service.OpsService,
 	settingService *service.SettingService,
 	cfg *config.Config,
+	modelTraceManagers ...*modeltrace.Manager,
 ) {
 	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
 	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
 	endpointNorm := handler.InboundEndpointMiddleware()
+	var modelTrace *modeltrace.Manager
+	if len(modelTraceManagers) > 0 {
+		modelTrace = modelTraceManagers[0]
+	}
+	if h != nil && h.OpenAIGateway != nil {
+		h.OpenAIGateway.SetModelTraceManager(modelTrace)
+	}
+	modelTraceCandidate := modelTrace.CandidateMiddleware()
+	modelTraceDeferred := modelTrace.DeferredCandidateMiddleware()
 
 	// 未分组 Key 拦截中间件（按协议格式区分错误响应）
 	requireGroupAnthropic := middleware.RequireGroupAssignment(settingService, middleware.AnthropicErrorWriter)
@@ -48,7 +59,11 @@ func RegisterGatewayRoutes(
 		case service.PlatformOpenAI:
 			h.OpenAIGateway.CountTokens(c)
 		case service.PlatformGrok:
+			// Grok token counting is a local estimate and must not create a model Trace.
 			h.OpenAIGateway.GrokCountTokens(c)
+		case service.PlatformAntigravity:
+			// Antigravity rejects this endpoint locally without an upstream model call.
+			h.Gateway.CountTokens(c)
 		default:
 			h.Gateway.CountTokens(c)
 		}
@@ -131,110 +146,13 @@ func RegisterGatewayRoutes(
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Videos API is not supported for this platform"}})
 	}
-	// API网关（Claude API兼容）
-	gateway := r.Group("/v1")
-	gateway.Use(bodyLimit)
-	gateway.Use(clientRequestID)
-	gateway.Use(opsErrorLogger)
-	gateway.Use(endpointNorm)
-	gateway.Use(gin.HandlerFunc(apiKeyAuth))
-	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
-	gateway.Use(requireGroupAnthropic)
-	{
-		// /v1/messages: auto-route based on group platform
-		gateway.POST("/messages", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Messages(c)
-				return
-			}
-			h.Gateway.Messages(c)
-		})
-		// /v1/messages/count_tokens: OpenAI bridges upstream, Grok estimates
-		// locally, and Anthropic-compatible platforms retain their existing path.
-		gateway.POST("/messages/count_tokens", countTokensHandler)
-		// Codex CLI / Codex app refresh their model picker from the provider's
-		// /models endpoint with a client_version query and expect the ChatGPT
-		// Codex manifest format; other clients keep the OpenAI-style list.
-		gateway.GET("/models", modelsHandler)
-		gateway.GET("/usage", h.Gateway.Usage)
-		// OpenAI Responses API: auto-route based on group platform
-		gateway.POST("/responses", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Responses(c)
-				return
-			}
-			h.Gateway.Responses(c)
-		})
-		gateway.POST("/responses/*subpath", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Responses(c)
-				return
-			}
-			h.Gateway.Responses(c)
-		})
-		gateway.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
-		gateway.GET("/responses", func(c *gin.Context) {
-			h.OpenAIGateway.ResponsesWebSocket(c)
-		})
-		// OpenAI Chat Completions API: auto-route based on group platform
-		gateway.POST("/chat/completions", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.ChatCompletions(c)
-				return
-			}
-			h.Gateway.ChatCompletions(c)
-		})
-		gateway.POST("/embeddings", textBodyLimit, func(c *gin.Context) {
-			if getGroupPlatform(c) != service.PlatformOpenAI {
-				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
-				c.JSON(http.StatusNotFound, gin.H{
-					"error": gin.H{
-						"type":    "not_found_error",
-						"message": "Embeddings API is not supported for this platform",
-					},
-				})
-				return
-			}
-			h.OpenAIGateway.Embeddings(c)
-		})
-		gateway.POST("/images/generations", imagesHandler)
-		gateway.POST("/images/edits", imagesHandler)
-		gateway.POST("/images/generations/async", h.AsyncImage.Submit)
-		gateway.POST("/images/edits/async", h.AsyncImage.Submit)
-		gateway.GET("/images/tasks/:task_id", h.AsyncImage.Get)
-		gateway.POST("/images/batches", h.BatchImage.Submit)
-		gateway.GET("/images/batches", h.BatchImage.List)
-		gateway.GET("/images/batches/models", h.BatchImage.Models)
-		gateway.GET("/images/batches/:id", h.BatchImage.Get)
-		gateway.GET("/images/batches/:id/items", h.BatchImage.Items)
-		gateway.GET("/images/batches/:id/items/:custom_id/content", h.BatchImage.ItemContent)
-		gateway.GET("/images/batches/:id/download", h.BatchImage.Download)
-		gateway.POST("/images/batches/:id/cancel", h.BatchImage.Cancel)
-		gateway.DELETE("/images/batches/:id", h.BatchImage.DeleteRecord)
-		gateway.DELETE("/images/batches/:id/outputs", h.BatchImage.DeleteOutputs)
-		gateway.POST("/videos/generations", videoGenerationHandler)
-		gateway.POST("/videos/edits", videoEditHandler)
-		gateway.POST("/videos/extensions", videoExtensionHandler)
-		gateway.GET("/videos/:request_id", videoStatusHandler)
-		gateway.GET("/videos/:request_id/content", videoContentHandler)
+	messagesHandler := func(c *gin.Context) {
+		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
+			h.OpenAIGateway.Messages(c)
+			return
+		}
+		h.Gateway.Messages(c)
 	}
-
-	// Gemini 原生 API 兼容层（Gemini SDK/CLI 直连）
-	gemini := r.Group("/v1beta")
-	gemini.Use(bodyLimit)
-	gemini.Use(clientRequestID)
-	gemini.Use(opsErrorLogger)
-	gemini.Use(endpointNorm)
-	gemini.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
-	gemini.Use(requireGroupGoogle)
-	{
-		gemini.GET("/models", h.Gateway.GeminiV1BetaListModels)
-		gemini.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
-		// Gin treats ":" as a param marker, but Gemini uses "{model}:{action}" in the same segment.
-		gemini.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
-	}
-
-	// OpenAI Responses API（不带v1前缀的别名）— auto-route based on group platform
 	responsesHandler := func(c *gin.Context) {
 		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 			h.OpenAIGateway.Responses(c)
@@ -242,34 +160,17 @@ func RegisterGatewayRoutes(
 		}
 		h.Gateway.Responses(c)
 	}
-	r.POST("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesHandler)
-	r.POST("/responses/*subpath", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesHandler)
-	r.POST("/alpha/search", textBodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
-	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
+	responsesWebSocketHandler := func(c *gin.Context) {
 		h.OpenAIGateway.ResponsesWebSocket(c)
-	})
-	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, modelsHandler)
-	r.POST("/messages/count_tokens", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, countTokensHandler)
-	codexDirect := r.Group("/backend-api/codex")
-	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic)
-	{
-		codexDirect.POST("/responses", responsesHandler)
-		codexDirect.POST("/responses/*subpath", responsesHandler)
-		codexDirect.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
-		codexDirect.GET("/responses", func(c *gin.Context) {
-			h.OpenAIGateway.ResponsesWebSocket(c)
-		})
-		codexDirect.GET("/models", h.OpenAIGateway.CodexModels)
 	}
-	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
-	r.POST("/chat/completions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
+	chatCompletionsHandler := func(c *gin.Context) {
 		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 			h.OpenAIGateway.ChatCompletions(c)
 			return
 		}
 		h.Gateway.ChatCompletions(c)
-	})
-	r.POST("/embeddings", textBodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
+	}
+	embeddingsHandler := func(c *gin.Context) {
 		if getGroupPlatform(c) != service.PlatformOpenAI {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{
@@ -281,49 +182,126 @@ func RegisterGatewayRoutes(
 			return
 		}
 		h.OpenAIGateway.Embeddings(c)
-	})
-	r.POST("/images/generations", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, imagesHandler)
-	r.POST("/images/edits", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, imagesHandler)
-	r.POST("/images/generations/async", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.AsyncImage.Submit)
-	r.POST("/images/edits/async", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.AsyncImage.Submit)
-	r.GET("/images/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.AsyncImage.Get)
-	r.POST("/videos/generations", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, videoGenerationHandler)
-	r.POST("/videos/edits", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, videoEditHandler)
-	r.POST("/videos/extensions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, videoExtensionHandler)
-	r.GET("/videos/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, videoStatusHandler)
-	r.GET("/videos/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, videoContentHandler)
+	}
 
-	// Antigravity 模型列表
-	r.GET("/antigravity/models", gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.Gateway.AntigravityModels)
+	apiKeyAuthHandler := gin.HandlerFunc(apiKeyAuth)
+	googleAPIKeyAuth := middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg)
 
-	// Antigravity 专用路由（仅使用 antigravity 账户，不混合调度）
-	antigravityV1 := r.Group("/antigravity/v1")
-	antigravityV1.Use(bodyLimit)
-	antigravityV1.Use(clientRequestID)
-	antigravityV1.Use(opsErrorLogger)
-	antigravityV1.Use(endpointNorm)
-	antigravityV1.Use(middleware.ForcePlatform(service.PlatformAntigravity))
-	antigravityV1.Use(gin.HandlerFunc(apiKeyAuth))
-	antigravityV1.Use(requireGroupAnthropic)
+	// API 网关（Claude/OpenAI 兼容）。模型执行与控制面使用显式、互斥的中间件链。
+	// OpsErrorLogger owns a pooled writer, so it must wrap Candidate; Candidate must
+	// still wrap API-key auth to observe the identity-resolution hook.
+	// Billing historically runs after API-key auth but before the group-assignment guard.
+	r.GET("/v1/sub2api/billing", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, h.Gateway.KeyBillingInfo)
+
 	{
+		gateway := r.Group("/v1", clientRequestID, opsErrorLogger, modelTraceCandidate)
+
+		// Model execution candidates.
+		gateway.POST("/messages", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, messagesHandler)
+		gateway.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
+		gateway.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
+		gateway.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
+		gateway.POST("/chat/completions", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, chatCompletionsHandler)
+		gateway.POST("/embeddings", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, embeddingsHandler)
+		gateway.POST("/images/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
+		gateway.POST("/images/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
+		gateway.POST("/images/generations/async", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
+		gateway.POST("/images/edits/async", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
+		gateway.POST("/images/batches", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.BatchImage.Submit)
+		gateway.POST("/videos/generations", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoGenerationHandler)
+		gateway.POST("/videos/edits", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoEditHandler)
+		gateway.POST("/videos/extensions", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoExtensionHandler)
+	}
+	r.POST("/v1/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, countTokensHandler)
+	{
+		// Control-plane routes retain their previous middleware order and never install Candidate.
+		gateway := r.Group("/v1", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic)
+		gateway.GET("/models", modelsHandler)
+		gateway.GET("/usage", h.Gateway.Usage)
+		gateway.GET("/responses", responsesWebSocketHandler)
+		gateway.GET("/images/tasks/:task_id", h.AsyncImage.Get)
+		gateway.GET("/images/batches", h.BatchImage.List)
+		gateway.GET("/images/batches/models", h.BatchImage.Models)
+		gateway.GET("/images/batches/:id", h.BatchImage.Get)
+		gateway.GET("/images/batches/:id/items", h.BatchImage.Items)
+		gateway.GET("/images/batches/:id/items/:custom_id/content", h.BatchImage.ItemContent)
+		gateway.GET("/images/batches/:id/download", h.BatchImage.Download)
+		gateway.POST("/images/batches/:id/cancel", h.BatchImage.Cancel)
+		gateway.DELETE("/images/batches/:id", h.BatchImage.DeleteRecord)
+		gateway.DELETE("/images/batches/:id/outputs", h.BatchImage.DeleteOutputs)
+		gateway.GET("/videos/:request_id", videoStatusHandler)
+		gateway.GET("/videos/:request_id/content", videoContentHandler)
+	}
+
+	// Gemini native API compatibility layer.
+	{
+		gemini := r.Group("/v1beta", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, googleAPIKeyAuth, requireGroupGoogle)
+		// Gin treats ":" as a param marker, but Gemini uses "{model}:{action}" in the same segment.
+		gemini.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
+	}
+	{
+		gemini := r.Group("/v1beta", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, googleAPIKeyAuth, requireGroupGoogle)
+		gemini.GET("/models", h.Gateway.GeminiV1BetaListModels)
+		gemini.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
+	}
+
+	// Root aliases: candidates install Candidate before the applicable body limit and auth chain.
+	r.POST("/responses", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
+	r.POST("/responses/*subpath", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
+	r.POST("/alpha/search", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
+	r.POST("/chat/completions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, chatCompletionsHandler)
+	r.POST("/embeddings", clientRequestID, opsErrorLogger, modelTraceCandidate, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, embeddingsHandler)
+	r.POST("/images/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
+	r.POST("/images/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, imagesHandler)
+	r.POST("/images/generations/async", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
+	r.POST("/images/edits/async", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Submit)
+	r.POST("/videos/generations", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoGenerationHandler)
+	r.POST("/videos/edits", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoEditHandler)
+	r.POST("/videos/extensions", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoExtensionHandler)
+	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesWebSocketHandler)
+	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, modelsHandler)
+	r.POST("/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, countTokensHandler)
+	r.GET("/images/tasks/:task_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.AsyncImage.Get)
+	r.GET("/videos/:request_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoStatusHandler)
+	r.GET("/videos/:request_id/content", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, videoContentHandler)
+
+	// Codex direct aliases.
+	{
+		codexDirect := r.Group("/backend-api/codex", clientRequestID, opsErrorLogger, modelTraceCandidate)
+		codexDirect.POST("/responses", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
+		codexDirect.POST("/responses/*subpath", bodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, responsesHandler)
+		codexDirect.POST("/alpha/search", bodyLimit, textBodyLimit, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
+	}
+	{
+		codexDirect := r.Group("/backend-api/codex", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, apiKeyAuthHandler, requireGroupAnthropic)
+		codexDirect.GET("/responses", responsesWebSocketHandler)
+		codexDirect.GET("/models", h.OpenAIGateway.CodexModels)
+	}
+
+	// Antigravity model list remains a control-plane route with its historical chain.
+	r.GET("/antigravity/models", apiKeyAuthHandler, requireGroupAnthropic, h.Gateway.AntigravityModels)
+
+	// Antigravity Anthropic-compatible routes.
+	{
+		antigravityV1 := r.Group("/antigravity/v1", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, middleware.ForcePlatform(service.PlatformAntigravity), apiKeyAuthHandler, requireGroupAnthropic)
 		antigravityV1.POST("/messages", h.Gateway.Messages)
-		antigravityV1.POST("/messages/count_tokens", h.Gateway.CountTokens)
+	}
+	r.POST("/antigravity/v1/messages/count_tokens", clientRequestID, opsErrorLogger, modelTraceDeferred, bodyLimit, endpointNorm, middleware.ForcePlatform(service.PlatformAntigravity), apiKeyAuthHandler, requireGroupAnthropic, countTokensHandler)
+	{
+		antigravityV1 := r.Group("/antigravity/v1", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, middleware.ForcePlatform(service.PlatformAntigravity), apiKeyAuthHandler, requireGroupAnthropic)
 		antigravityV1.GET("/models", h.Gateway.AntigravityModels)
 		antigravityV1.GET("/usage", h.Gateway.Usage)
 	}
 
-	antigravityV1Beta := r.Group("/antigravity/v1beta")
-	antigravityV1Beta.Use(bodyLimit)
-	antigravityV1Beta.Use(clientRequestID)
-	antigravityV1Beta.Use(opsErrorLogger)
-	antigravityV1Beta.Use(endpointNorm)
-	antigravityV1Beta.Use(middleware.ForcePlatform(service.PlatformAntigravity))
-	antigravityV1Beta.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
-	antigravityV1Beta.Use(requireGroupGoogle)
+	// Antigravity Gemini-compatible routes.
 	{
+		antigravityV1Beta := r.Group("/antigravity/v1beta", clientRequestID, opsErrorLogger, modelTraceCandidate, bodyLimit, endpointNorm, middleware.ForcePlatform(service.PlatformAntigravity), googleAPIKeyAuth, requireGroupGoogle)
+		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
+	}
+	{
+		antigravityV1Beta := r.Group("/antigravity/v1beta", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, middleware.ForcePlatform(service.PlatformAntigravity), googleAPIKeyAuth, requireGroupGoogle)
 		antigravityV1Beta.GET("/models", h.Gateway.GeminiV1BetaListModels)
 		antigravityV1Beta.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
-		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 
 }

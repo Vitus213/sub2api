@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -119,13 +120,24 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	// 10. Build upstream request
 	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
-	upstreamReq, _, err := s.buildUpstreamRequest(upstreamCtx, c, account, anthropicBody, token, tokenType, mappedModel, reqStream, shouldMimicClaudeCode)
+	upstreamReq, wireBody, err := s.buildUpstreamRequest(upstreamCtx, c, account, anthropicBody, token, tokenType, mappedModel, reqStream, shouldMimicClaudeCode)
 	releaseUpstreamCtx()
 	if err != nil {
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
 	// 11. Send request
+	upstreamReq = upstreamReq.WithContext(recording.WithAttemptSource(upstreamReq.Context(), recording.AttemptSource{
+		Metadata: recording.AttemptMetadata{
+			Provider:      account.Platform,
+			Operation:     "chat",
+			ClientModel:   originalModel,
+			UpstreamModel: mappedModel,
+			AccountID:     account.ID,
+			Endpoint:      upstreamReq.URL.String(),
+		},
+		Input: wireBody,
+	}))
 	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		if resp != nil && resp.Body != nil {
@@ -361,6 +373,11 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	includeUsage bool,
 ) (*ForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
+	traceCtx := context.Background()
+	if c.Request != nil {
+		traceCtx = c.Request.Context()
+	}
+	recording.BeginStream(traceCtx)
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -381,6 +398,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
+	sawTerminalEvent := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -405,18 +423,32 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	writeChunk := func(chunk apicompat.ChatCompletionsChunk) bool {
 		sse, err := apicompat.ChatChunkToSSE(chunk)
 		if err != nil {
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamError, ErrorStage: "protocol_conversion", Err: err,
+			})
 			return false
 		}
 		// Reverse tool name mapping: fake → real, per-chunk bytes.Replace.
 		// c 可能持有请求侧注入的 ToolNameRewrite；无则仅做静态前缀还原。
 		out := string(reverseToolNamesIfPresent(c, []byte(sse)))
 		if _, err := fmt.Fprint(c.Writer, out); err != nil {
-			return true // client disconnected
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamClientDisconnected, ErrorStage: "downstream_write", Err: err,
+			})
+			return true
 		}
 		return false
 	}
 
 	processAnthropicEvent := func(event *apicompat.AnthropicStreamEvent) bool {
+		switch event.Type {
+		case "message_stop":
+			sawTerminalEvent = true
+		case "error":
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamError, ErrorStage: "upstream_protocol", Err: errors.New("anthropic stream error event"),
+			})
+		}
 		if firstChunk {
 			firstChunk = false
 			ms := int(time.Since(startTime).Milliseconds())
@@ -478,6 +510,23 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 				zap.String("request_id", requestID),
 			)
 		}
+		status := recording.StreamError
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = recording.StreamCancelled
+		}
+		recording.EndStream(traceCtx, recording.StreamOutcome{
+			Status: status, ErrorStage: "upstream_read", Err: err,
+		})
+	} else if !sawTerminalEvent {
+		if err := traceCtx.Err(); err != nil {
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamCancelled, ErrorStage: "upstream_read", Err: err,
+			})
+		} else {
+			recording.EndStream(traceCtx, recording.StreamOutcome{
+				Status: recording.StreamError, ErrorStage: "upstream_protocol", Err: io.ErrUnexpectedEOF,
+			})
+		}
 	}
 
 	// Finalize both state machines
@@ -494,7 +543,13 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	}
 
 	// Write [DONE] marker
-	fmt.Fprint(c.Writer, "data: [DONE]\n\n") //nolint:errcheck
+	if _, err := fmt.Fprint(c.Writer, "data: [DONE]\n\n"); err != nil {
+		recording.EndStream(traceCtx, recording.StreamOutcome{
+			Status: recording.StreamClientDisconnected, ErrorStage: "downstream_write", Err: err,
+		})
+	} else if sawTerminalEvent {
+		recording.EndStream(traceCtx, recording.StreamOutcome{Status: recording.StreamCompleted})
+	}
 	c.Writer.Flush()
 
 	return resultWithUsage(), nil

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -98,6 +99,19 @@ type Config struct {
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+	ModelTracing            ModelTracingConfig            `mapstructure:"model_tracing"`
+}
+
+// ModelTracingConfig 模型请求 OTEL/Langfuse 追踪配置（默认关闭）。
+type ModelTracingConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	Endpoint            string `mapstructure:"endpoint"`
+	PublicKey           string `mapstructure:"public_key"`
+	SecretKey           string `mapstructure:"secret_key"`
+	PromptMaxBytes      int    `mapstructure:"prompt_max_bytes"`
+	ResponseMaxBytes    int    `mapstructure:"response_max_bytes"`
+	MediaMaxBytes       int    `mapstructure:"media_max_bytes"`
+	CaptureMediaContent bool   `mapstructure:"capture_media_content"`
 }
 
 type LogConfig struct {
@@ -1686,6 +1700,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		cfg.Server.Mode = "debug"
 	}
 	cfg.Server.FrontendURL = strings.TrimSpace(cfg.Server.FrontendURL)
+	normalizeModelTracingConfig(&cfg.ModelTracing)
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
 	cfg.LinuxDo.ClientID = strings.TrimSpace(cfg.LinuxDo.ClientID)
 	cfg.LinuxDo.ClientSecret = strings.TrimSpace(cfg.LinuxDo.ClientSecret)
@@ -2340,6 +2355,8 @@ func setDefaults() {
 	// Subscription Maintenance (bounded queue + worker pool)
 	viper.SetDefault("subscription_maintenance.worker_count", 2)
 	viper.SetDefault("subscription_maintenance.queue_size", 1024)
+
+	setModelTracingDefaults()
 
 	setEnvReachableDefaults()
 }
@@ -3555,5 +3572,63 @@ func warnIfInsecureURL(field, raw string) {
 	}
 	if strings.EqualFold(u.Scheme, "http") {
 		slog.Warn("url uses http scheme; use https in production to avoid token leakage", "field", field)
+	}
+}
+
+func setModelTracingDefaults() {
+	viper.SetDefault("model_tracing.enabled", false)
+	viper.SetDefault("model_tracing.endpoint", "")
+	viper.SetDefault("model_tracing.public_key", "")
+	viper.SetDefault("model_tracing.secret_key", "")
+	viper.SetDefault("model_tracing.prompt_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.response_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.media_max_bytes", 1<<20)
+	viper.SetDefault("model_tracing.capture_media_content", false)
+}
+
+// normalizeModelTracingConfig applies safe capture defaults and degrades an invalid
+// deployment target to disabled. Runtime updates use the stricter modeltrace validator.
+func normalizeModelTracingConfig(value *ModelTracingConfig) {
+	if value == nil {
+		return
+	}
+	value.Endpoint = strings.TrimSpace(value.Endpoint)
+	value.PublicKey = strings.TrimSpace(value.PublicKey)
+	value.SecretKey = strings.TrimSpace(value.SecretKey)
+	if value.PromptMaxBytes <= 0 {
+		value.PromptMaxBytes = 1 << 20
+	}
+	if value.ResponseMaxBytes <= 0 {
+		value.ResponseMaxBytes = 1 << 20
+	}
+	if value.MediaMaxBytes <= 0 {
+		value.MediaMaxBytes = 1 << 20
+	}
+	if !value.Enabled {
+		return
+	}
+	if value.PublicKey == "" || value.SecretKey == "" || !validModelTracingEndpoint(value.Endpoint) {
+		value.Enabled = false
+		slog.Warn("invalid model_tracing deployment config; tracing disabled")
+	}
+}
+
+func validModelTracingEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return true
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
 	}
 }

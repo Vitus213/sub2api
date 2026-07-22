@@ -18,6 +18,7 @@ import (
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
@@ -131,6 +132,46 @@ func runSetupServer() {
 	}
 }
 
+func (app *Application) activate() {
+	modeltrace.InstallDefaultConfigManager(app.ModelTraceConfig)
+	if app.ModelTraceConfig != nil {
+		if err := app.ModelTraceConfig.Start(context.Background()); err != nil {
+			log.Printf("Model tracing runtime config started in degraded state: %v", err)
+		}
+	}
+}
+
+func (app *Application) cleanup() {
+	modeltrace.InstallDefaultConfigManager(nil)
+	if app.ModelTraceConfig != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := app.ModelTraceConfig.Shutdown(ctx); err != nil {
+			log.Printf("Model tracing config refresh shutdown failed: %v", err)
+		}
+		cancel()
+	}
+	if app.Cleanup != nil {
+		app.Cleanup()
+	}
+}
+
+type modelTraceShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func shutdownModelTracing(ctx context.Context, configManager, runtime modelTraceShutdowner) {
+	if configManager != nil {
+		if err := configManager.Shutdown(ctx); err != nil {
+			log.Printf("Model tracing config refresh shutdown failed: %v", err)
+		}
+	}
+	if runtime != nil {
+		if err := runtime.Shutdown(ctx); err != nil {
+			log.Printf("Model tracing shutdown failed: %v", err)
+		}
+	}
+}
+
 func runMainServer() {
 	cfg, err := config.LoadForBootstrap()
 	if err != nil {
@@ -139,6 +180,12 @@ func runMainServer() {
 	if err := logger.Init(logger.OptionsFromConfig(cfg.Log)); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
+	modelTrace, err := modeltrace.NewManager(context.Background(), cfg.ModelTracing)
+	if err != nil {
+		log.Printf("Model tracing disabled after initialization failed: %v", err)
+		modelTrace, _ = modeltrace.NewManager(context.Background(), config.ModelTracingConfig{})
+	}
+
 	if cfg.RunMode == config.RunModeSimple {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
@@ -148,11 +195,12 @@ func runMainServer() {
 		BuildType: BuildType,
 	}
 
-	app, err := initializeApplication(buildInfo)
+	app, err := initializeApplication(buildInfo, modelTrace)
 	if err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
-	defer app.Cleanup()
+	app.activate()
+	defer app.cleanup()
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
@@ -185,6 +233,7 @@ func runMainServer() {
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
+	shutdownModelTracing(ctx, app.ModelTraceConfig, modelTrace)
 
 	log.Println("Server exited")
 }

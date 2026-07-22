@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent/batchimagejob"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 )
 
 // BatchImageJob is the model entity for the BatchImageJob schema.
@@ -71,6 +73,8 @@ type BatchImageJob struct {
 	RetryCount int `json:"retry_count,omitempty"`
 	// Version holds the value of the "version" field.
 	Version int `json:"version,omitempty"`
+	// TraceContinuation holds the value of the "trace_continuation" field.
+	TraceContinuation recording.TraceContinuation `json:"trace_continuation,omitempty"`
 	// OutputExpiresAt holds the value of the "output_expires_at" field.
 	OutputExpiresAt *time.Time `json:"output_expires_at,omitempty"`
 	// InputDeletedAt holds the value of the "input_deleted_at" field.
@@ -105,6 +109,8 @@ func (*BatchImageJob) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case batchimagejob.FieldTraceContinuation:
+			values[i] = new([]byte)
 		case batchimagejob.FieldEstimatedCost, batchimagejob.FieldHoldAmount, batchimagejob.FieldActualCost:
 			values[i] = new(sql.NullFloat64)
 		case batchimagejob.FieldID, batchimagejob.FieldUserID, batchimagejob.FieldAPIKeyID, batchimagejob.FieldAccountID, batchimagejob.FieldItemCount, batchimagejob.FieldSuccessCount, batchimagejob.FieldFailCount, batchimagejob.FieldCancelledCount, batchimagejob.FieldRetryCount, batchimagejob.FieldVersion:
@@ -308,6 +314,14 @@ func (_m *BatchImageJob) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field version", values[i])
 			} else if value.Valid {
 				_m.Version = int(value.Int64)
+			}
+		case batchimagejob.FieldTraceContinuation:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field trace_continuation", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.TraceContinuation); err != nil {
+					return fmt.Errorf("unmarshal field trace_continuation: %w", err)
+				}
 			}
 		case batchimagejob.FieldOutputExpiresAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -540,6 +554,9 @@ func (_m *BatchImageJob) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("version=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Version))
+	builder.WriteString(", ")
+	builder.WriteString("trace_continuation=")
+	builder.WriteString(fmt.Sprintf("%v", _m.TraceContinuation))
 	builder.WriteString(", ")
 	if v := _m.OutputExpiresAt; v != nil {
 		builder.WriteString("output_expires_at=")

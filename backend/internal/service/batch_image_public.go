@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"go.uber.org/zap"
@@ -252,6 +253,17 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 	if err != nil {
 		return nil, err
 	}
+	continuation, hasContinuation := recording.ContinuationFromContext(ctx)
+	var traceContinuation *recording.TraceContinuation
+	if hasContinuation {
+		copy := continuation
+		traceContinuation = &copy
+	}
+	itemIDs := make([]string, 0, len(normalized.Items))
+	for _, item := range normalized.Items {
+		itemIDs = append(itemIDs, item.CustomID)
+	}
+	recording.RecordAsyncSubmission(ctx, batchID, itemIDs)
 	apiKeyID := owner.APIKeyID
 	accountID := account.ID
 	holdID := BatchImageHoldRequestID(batchID)
@@ -281,6 +293,7 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 		HoldID:                  &holdID,
 		IdempotencyKey:          batchImageOptionalStringPtr(idempotencyKey),
 		RequestHash:             batchImageStringPtr(requestHash),
+		TraceContinuation:       traceContinuation,
 	})
 	if err != nil {
 		return nil, err

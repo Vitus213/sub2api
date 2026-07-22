@@ -1,9 +1,12 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 )
 
 const (
@@ -213,4 +216,25 @@ func (u *UsageLog) SyncRequestTypeAndLegacyFields() {
 	requestType := u.EffectiveRequestType()
 	u.RequestType = requestType
 	u.Stream, u.OpenAIWSMode = ApplyLegacyRequestFields(requestType, u.Stream, u.OpenAIWSMode)
+}
+
+func recordModelTraceUsage(ctx context.Context, usageLog *UsageLog) {
+	if usageLog == nil {
+		return
+	}
+	model := ""
+	if usageLog.UpstreamModel != nil {
+		model = strings.TrimSpace(*usageLog.UpstreamModel)
+	}
+	recording.RecordUsage(ctx, recording.UsageFacts{
+		Known: true, RequestID: usageLog.RequestID, Model: model, AccountID: usageLog.AccountID,
+		InputTokens: usageLog.InputTokens, OutputTokens: usageLog.OutputTokens,
+		CacheCreationTokens: usageLog.CacheCreationTokens, CacheReadTokens: usageLog.CacheReadTokens,
+		ImageInputTokens: usageLog.ImageInputTokens, ImageOutputTokens: usageLog.ImageOutputTokens,
+		InputCost: usageLog.InputCost, OutputCost: usageLog.OutputCost,
+		CacheCreationCost: usageLog.CacheCreationCost, CacheReadCost: usageLog.CacheReadCost,
+		ImageInputCost: usageLog.ImageInputCost, ImageOutputCost: usageLog.ImageOutputCost,
+		TotalCost: usageLog.TotalCost, ActualCost: usageLog.ActualCost,
+		DurationMs: usageLog.DurationMs, FirstTokenMs: usageLog.FirstTokenMs,
+	})
 }

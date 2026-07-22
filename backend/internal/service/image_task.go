@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace/recording"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/google/uuid"
@@ -32,16 +33,17 @@ var (
 // ImageTaskRecord is the private Redis representation of an asynchronous image
 // request. Ownership fields are intentionally omitted from the public view.
 type ImageTaskRecord struct {
-	ID          string          `json:"id"`
-	UserID      int64           `json:"user_id"`
-	APIKeyID    int64           `json:"api_key_id"`
-	Status      string          `json:"status"`
-	HTTPStatus  int             `json:"http_status,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Error       json.RawMessage `json:"error,omitempty"`
-	CreatedAt   int64           `json:"created_at"`
-	CompletedAt *int64          `json:"completed_at,omitempty"`
-	ExpiresAt   int64           `json:"expires_at"`
+	ID                string                       `json:"id"`
+	UserID            int64                        `json:"user_id"`
+	APIKeyID          int64                        `json:"api_key_id"`
+	Status            string                       `json:"status"`
+	HTTPStatus        int                          `json:"http_status,omitempty"`
+	Result            json.RawMessage              `json:"result,omitempty"`
+	Error             json.RawMessage              `json:"error,omitempty"`
+	CreatedAt         int64                        `json:"created_at"`
+	CompletedAt       *int64                       `json:"completed_at,omitempty"`
+	ExpiresAt         int64                        `json:"expires_at"`
+	TraceContinuation *recording.TraceContinuation `json:"trace_continuation,omitempty"`
 }
 
 // ImageTask is the API-safe task representation returned to callers.
@@ -151,6 +153,10 @@ func (s *ImageTaskService) ExecutionTimeout() time.Duration {
 }
 
 func (s *ImageTaskService) Create(ctx context.Context, owner ImageTaskOwner) (*ImageTask, error) {
+	return s.CreateWithContinuation(ctx, owner, recording.TraceContinuation{})
+}
+
+func (s *ImageTaskService) CreateWithContinuation(ctx context.Context, owner ImageTaskOwner, continuation recording.TraceContinuation) (*ImageTask, error) {
 	if s == nil || s.store == nil {
 		return nil, ErrImageTaskUnavailable
 	}
@@ -162,6 +168,10 @@ func (s *ImageTaskService) Create(ctx context.Context, owner ImageTaskOwner) (*I
 		Status:    ImageTaskStatusProcessing,
 		CreatedAt: now.Unix(),
 		ExpiresAt: now.Add(s.ttl).Unix(),
+	}
+	if continuation.Valid() {
+		copy := continuation
+		task.TraceContinuation = &copy
 	}
 	if err := s.store.Save(ctx, task, s.ttl); err != nil {
 		return nil, ErrImageTaskUnavailable.WithCause(err)

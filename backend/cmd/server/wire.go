@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/modeltrace"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
@@ -25,12 +26,13 @@ import (
 )
 
 type Application struct {
-	Server      *http.Server
-	PromptAudit *securityaudit.PromptService
-	Cleanup     func()
+	Server           *http.Server
+	PromptAudit      *securityaudit.PromptService
+	ModelTraceConfig *modeltrace.ConfigManager
+	Cleanup          func()
 }
 
-func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
+func initializeApplication(buildInfo handler.BuildInfo, modelTrace *modeltrace.Manager) (*Application, error) {
 	wire.Build(
 		// Infrastructure layer ProviderSets
 		config.ProviderSet,
@@ -52,11 +54,15 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		// BuildInfo provider
 		provideServiceBuildInfo,
 
+		// Model tracing runtime configuration provider
+		provideModelTraceConfigManager,
+		provideBatchImageTraceRecorder,
+
 		// Cleanup function provider
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "ModelTraceConfig", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -70,6 +76,21 @@ func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
+}
+
+func provideModelTraceConfigManager(
+	cfg *config.Config,
+	settings service.SettingRepository,
+	encryptor service.SecretEncryptor,
+	runtime *modeltrace.Manager,
+) *modeltrace.ConfigManager {
+	return modeltrace.NewConfigManager(
+		cfg.ModelTracing,
+		settings,
+		encryptor,
+		cfg.Totp.EncryptionKeyConfigured,
+		runtime,
+	)
 }
 
 func provideCleanup(
