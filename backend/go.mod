@@ -1,6 +1,6 @@
 module github.com/Wei-Shaw/sub2api
 
-go 1.26.6
+go 1.26.8
 
 require (
 	entgo.io/ent v0.14.5
