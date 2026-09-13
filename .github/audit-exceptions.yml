@@ -35,3 +35,32 @@ exceptions:
     mitigation: "Proxy configuration not user-controlled; upgrade when axios releases fix"
     expires_on: "2026-07-10"
     owner: "security@your-domain"
+
+  - package: postcss
+    advisory: "GHSA-6g55-p6wh-862q"
+    severity: high
+    reason: "Build-time only; no user-supplied CSS or attacker-controlled sourceMappingURL reaches PostCSS"
+    mitigation: "Upgrade postcss to a patched release when available"
+    expires_on: "2026-12-31"
+    owner: "security@your-domain"
+  - package: postcss
+    advisory: "GHSA-r28c-9q8g-f849"
+    severity: high
+    reason: "Build-time only; previous source maps are loaded from trusted local files, not remote URLs"
+    mitigation: "Upgrade postcss to a patched release when available"
+    expires_on: "2026-12-31"
+    owner: "security@your-domain"
+  - package: nanoid
+    advisory: "GHSA-28wg-ghj8-5hjv"
+    severity: high
+    reason: "All nanoid call sites pass constant positive sizes; loop only triggers on size <= 0"
+    mitigation: "Upgrade nanoid to a patched release when available"
+    expires_on: "2026-12-31"
+    owner: "security@your-domain"
+  - package: nanoid
+    advisory: "GHSA-2v37-7h3g-55p8"
+    severity: high
+    reason: "All nanoid call sites pass constant positive sizes; loop only triggers on size <= 0"
+    mitigation: "Upgrade nanoid to a patched release when available"
+    expires_on: "2026-12-31"
+    owner: "security@your-domain"
